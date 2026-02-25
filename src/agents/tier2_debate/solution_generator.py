@@ -4,11 +4,14 @@ Proposes novel solutions to research problems.
 """
 
 import json
-from typing import List
+from typing import List, Optional
 
 from src.models.schemas import ProblemStatement, SolutionProposal
 from src.utils.logger import get_logger
 from src.utils.ollama_client import get_ollama_client
+from src.llm.hybrid_router import HybridRouter
+from src.llm.multi_backend_manager import get_backend_manager
+from src.llm.free_tier_optimizer import get_free_tier_optimizer
 from src.utils.json_parser import safe_parse_solutions
 from src.agents.tier2_debate.prompts import get_solution_generator_prompt
 from src.pipeline.state import AgentState, add_warning
@@ -19,7 +22,8 @@ logger = get_logger("solution_generator")
 async def generate_solutions(
     problem: ProblemStatement,
     iteration: int = 1,
-    previous_critique: str = None
+    previous_critique: str = None,
+    router: Optional[HybridRouter] = None
 ) -> List[SolutionProposal]:
     """
     Generate novel solutions to a problem.
@@ -28,29 +32,55 @@ async def generate_solutions(
         problem: Problem statement
         iteration: Which iteration (1, 2, 3)
         previous_critique: Feedback from critic (if any)
+        router: Optional HybridRouter instance (creates one if None)
     
     Returns:
         List of solution proposals
     """
     logger.info(f"💡 Generating solutions (iteration {iteration})...")
     
-    client = get_ollama_client()
+    # Use multi-backend router for better model access
+    if router is None:
+        manager = get_backend_manager()
+        router = HybridRouter(manager)
+    
+    # Get optimal free backend
+    optimizer = get_free_tier_optimizer()
+    optimal_backend = optimizer.get_optimal_backend(
+        task_type="code_generation",
+        prefer_speed=False  # Prefer quality for solutions
+    )
     
     # Use centralized prompt
     prompt = get_solution_generator_prompt(problem, iteration, previous_critique)
+    
+    # Convert to messages format
+    messages = [
+        {"role": "system", "content": "You are an expert AI researcher proposing novel solutions."},
+        {"role": "user", "content": prompt}
+    ]
 
     try:
-        response = await client.generate(
-            model="qwen3:4b",  # 262K context for debate history
-            prompt=prompt,
-            temperature=0.8  # Higher for creativity
+        # Use hybrid router with free-tier optimization
+        result = await router.generate_with_fallback(
+            task_type="code_generation",
+            messages=messages,
+            temperature=0.8,  # Higher for creativity
+            max_tokens=8192
         )
         
-        content = response.get("content", "")  # ollama_client uses "content" not "response"
+        if not result or not result.success:
+            logger.error(f"Generation failed: {result.error if result else 'No result'}")
+            return []
+        
+        # Record usage for free-tier tracking
+        optimizer.record_usage(result.backend, result.model, result.tokens)
+        
+        content = result.content or ""
         
         # Log what we got for debugging
         logger.info("="*60)
-        logger.info(f"RAW OUTPUT FROM QWEN3:4B ({len(content)} chars):")
+        logger.info(f"RAW OUTPUT FROM {result.backend}/{result.model} ({len(content)} chars, {result.latency:.2f}s):")
         logger.info(content[:500] if len(content) > 500 else content)
         logger.info("="*60)
         

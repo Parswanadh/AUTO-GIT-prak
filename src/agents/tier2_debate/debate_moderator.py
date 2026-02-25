@@ -10,8 +10,11 @@ from src.models.schemas import (
     SolutionProposal, CritiqueReport, DebateRound, FinalSolution, ProblemStatement
 )
 from src.utils.logger import get_logger
+from src.llm.hybrid_router import HybridRouter
+from src.llm.multi_backend_manager import get_backend_manager
 from src.agents.tier2_debate.solution_generator import generate_solutions
 from src.agents.tier2_debate.expert_critic import critique_solution
+from src.agents.tier2_debate.multi_critic_consensus import MultiCriticPanel, evaluate_with_consensus
 from src.pipeline.state import AgentState, update_state_status
 
 logger = get_logger("debate_moderator")
@@ -19,11 +22,13 @@ logger = get_logger("debate_moderator")
 
 MAX_DEBATE_ROUNDS = 3
 ACCEPTANCE_THRESHOLD = 7.5
+USE_MULTI_CRITIC = True  # Enable multi-critic consensus
 
 
 async def moderate_debate(
     problem: ProblemStatement,
-    max_rounds: int = MAX_DEBATE_ROUNDS
+    max_rounds: int = MAX_DEBATE_ROUNDS,
+    router: Optional[HybridRouter] = None
 ) -> Optional[FinalSolution]:
     """
     Facilitate debate between generator and critic.
@@ -31,11 +36,17 @@ async def moderate_debate(
     Args:
         problem: Problem to solve
         max_rounds: Maximum debate rounds
+        router: Optional HybridRouter instance (creates one if None)
     
     Returns:
         FinalSolution after consensus or max rounds
     """
     logger.info(f"🎭 Starting debate (max {max_rounds} rounds)...")
+    
+    # Use shared router for all debate agents
+    if router is None:
+        manager = get_backend_manager()
+        router = HybridRouter(manager)
     
     debate_history = []
     best_solution = None
@@ -47,18 +58,72 @@ async def moderate_debate(
         logger.info(f"🔄 DEBATE ROUND {round_num}/{max_rounds}")
         logger.info(f"{'='*60}\n")
         
-        # Generator proposes solutions
-        solutions = await generate_solutions(problem, round_num, previous_critique)
+        # Generator proposes solutions (pass shared router)
+        solutions = await generate_solutions(problem, round_num, previous_critique, router)
         
         if not solutions:
             logger.error(f"No solutions generated in round {round_num}")
             break
         
-        # Critic reviews each solution
-        logger.info(f"\n🔍 Critic reviewing {len(solutions)} proposals...")
+        # Review each solution with multi-critic consensus or single critic
+        logger.info(f"\n🔍 {'Multi-critic panel' if USE_MULTI_CRITIC else 'Critic'} reviewing {len(solutions)} proposals...")
         
-        for solution in solutions:
-            critique = await critique_solution(solution, problem)
+        if USE_MULTI_CRITIC:
+            # Use multi-critic consensus for more robust evaluation
+            panel = MultiCriticPanel(router=router)
+            
+            for solution in solutions:
+                consensus = await panel.evaluate_solution(solution, problem)
+                
+                if not consensus:
+                    continue
+                
+                # Create critique from consensus (for compatibility)
+                critique = CritiqueReport(
+                    overall_assessment=consensus.recommendation,
+                    strengths=consensus.common_strengths,
+                    weaknesses=consensus.common_weaknesses,
+                    technical_concerns=[c[:100] for c in consensus.contentious_points],
+                    missing_considerations=[],
+                    real_world_feasibility=consensus.avg_feasibility,
+                    optimization_suggestions=[op.critique.optimization_suggestions[0] for op in consensus.individual_critiques if op.critique.optimization_suggestions][:3],
+                    verdict=consensus.recommendation
+                )
+                
+                # Record this round
+                round_data = DebateRound(
+                    round_number=round_num,
+                    solution=solution,
+                    critique=critique
+                )
+                debate_history.append(round_data)
+                
+                # Track best solution
+                if consensus.avg_feasibility > best_feasibility:
+                    best_feasibility = consensus.avg_feasibility
+                    best_solution = solution
+                
+                # Check for acceptance (with higher threshold for multi-critic)
+                if consensus.recommendation == "accept" and consensus.avg_feasibility >= ACCEPTANCE_THRESHOLD and consensus.agreement_level >= 0.7:
+                    logger.info(f"\n🎉 MULTI-CRITIC CONSENSUS REACHED!")
+                    logger.info(f"   Solution: {solution.approach_name}")
+                    logger.info(f"   Avg Feasibility: {consensus.avg_feasibility:.1f}/10")
+                    logger.info(f"   Agreement Level: {consensus.agreement_level:.1%}")
+                    logger.info(f"   Confidence: {consensus.confidence:.1%}")
+                    logger.info(f"   Rounds taken: {round_num}")
+                    
+                    return FinalSolution(
+                        solution=solution,
+                        debate_history=debate_history,
+                        consensus_reached=True,
+                        confidence_score=consensus.consensus_score,
+                        iterations_taken=round_num,
+                        final_verdict=f"Accepted by multi-critic panel after {round_num} rounds (agreement={consensus.agreement_level:.1%})"
+                    )
+        else:
+            # Original single-critic approach
+            for solution in solutions:
+                critique = await critique_solution(solution, problem, router)
             
             if not critique:
                 continue

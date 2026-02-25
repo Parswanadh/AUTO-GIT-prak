@@ -11,7 +11,27 @@
       "Bash(tasklist:*)",
       "Bash(echo:*)",
       "Bash(timeout:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "mcp__plugin_claude-mermaid_mermaid__mermaid_preview",
+      "Bash(curl:*)",
+      "Bash(pip show:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(ollama create:*)",
+      "Bash(ollama ps:*)",
+      "mcp__sequential-thinking__sequentialthinking",
+      "mcp__web-search__search",
+      "Bash(mkdir:*)",
+      "Bash(set PYTHONIOENCODING=utf-8:*)",
+      "Bash(findstr:*)"
     ]
+  },
+  "enabledPlugins": {
+    "claude-mem@thedotmack": false,
+    "explanatory-output-style@claude-plugins-official": false,
+    "frontend-design@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "feature-dev@claude-plugins-official": false,
+    "playwright@claude-plugins-official": true,
+    "ralph-wiggum@claude-plugins-official": false
   }
 }

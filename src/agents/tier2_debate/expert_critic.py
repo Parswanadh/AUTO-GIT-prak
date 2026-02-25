@@ -8,7 +8,9 @@ from typing import Optional
 
 from src.models.schemas import SolutionProposal, CritiqueReport, ProblemStatement
 from src.utils.logger import get_logger
-from src.utils.ollama_client import get_ollama_client
+from src.llm.hybrid_router import HybridRouter
+from src.llm.multi_backend_manager import get_backend_manager
+from src.llm.free_tier_optimizer import get_free_tier_optimizer
 from src.utils.json_parser import safe_parse_critique
 from src.agents.tier2_debate.prompts import get_expert_critic_prompt
 from src.pipeline.state import AgentState
@@ -18,7 +20,8 @@ logger = get_logger("expert_critic")
 
 async def critique_solution(
     solution: SolutionProposal,
-    problem: ProblemStatement
+    problem: ProblemStatement,
+    router: Optional[HybridRouter] = None
 ) -> Optional[CritiqueReport]:
     """
     Critique a solution proposal.
@@ -26,13 +29,24 @@ async def critique_solution(
     Args:
         solution: Solution to critique
         problem: Original problem
+        router: Optional HybridRouter instance (creates one if None)
     
     Returns:
         CritiqueReport or None on error
     """
     logger.info(f"🔍 Critiquing: {solution.approach_name}...")
     
-    client = get_ollama_client()
+    # Use multi-backend router for better model access
+    if router is None:
+        manager = get_backend_manager()
+        router = HybridRouter(manager)
+    
+    # Get optimal free backend for critique (reasoning task)
+    optimizer = get_free_tier_optimizer()
+    optimal_backend = optimizer.get_optimal_backend(
+        task_type="reasoning",
+        prefer_speed=False  # Prefer quality for critiques
+    )
     
     # Build prompt (not f-string to avoid brace escaping issues)
     prompt = """You are a senior AI researcher peer-reviewing a proposed solution.
@@ -76,18 +90,33 @@ JSON format:
   "verdict": "accept|revise|reject"
 }"""
 
+    # Convert to messages format
+    messages = [
+        {"role": "system", "content": "You are a senior AI researcher peer-reviewing a proposed solution."},
+        {"role": "user", "content": prompt}
+    ]
+
     try:
-        response = await client.generate(
-            model="qwen3:4b",  # 262K context for critique
-            prompt=prompt,
-            temperature=0.4  # Balanced
+        # Use hybrid router with free-tier optimization
+        result = await router.generate_with_fallback(
+            task_type="reasoning",
+            messages=messages,
+            temperature=0.4,  # Balanced for critique
+            max_tokens=4096
         )
         
-        content = response.get("content", "")  # ollama_client uses "content" not "response"
+        if not result or not result.success:
+            logger.error(f"Critique generation failed: {result.error if result else 'No result'}")
+            return None
+        
+        # Record usage for free-tier tracking
+        optimizer.record_usage(result.backend, result.model, result.tokens)
+        
+        content = result.content or ""
         
         # Log what we got
         logger.info("="*60)
-        logger.info(f"RAW CRITIQUE FROM QWEN3:8B ({len(content)} chars):")
+        logger.info(f"RAW CRITIQUE FROM {result.backend}/{result.model} ({len(content)} chars, {result.latency:.2f}s):")
         logger.info(content[:500] if len(content) > 500 else content)
         logger.info("="*60)
         

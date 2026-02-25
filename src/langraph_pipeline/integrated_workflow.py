@@ -18,6 +18,7 @@ from typing import Literal
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .state import AutoGITState, create_initial_state
 from .nodes import (
@@ -137,20 +138,37 @@ def build_integrated_workflow() -> StateGraph:
     return workflow
 
 
-def compile_integrated_workflow() -> StateGraph:
+def compile_integrated_workflow(use_persistent_checkpoints: bool = True) -> StateGraph:
     """
     Compile the integrated workflow with memory persistence
+
+    Args:
+        use_persistent_checkpoints: If True, use SQLite for persistent checkpoints.
+                                   If False, use in-memory checkpoints (testing only).
 
     Returns:
         Compiled workflow ready for execution
     """
     workflow = build_integrated_workflow()
 
-    # Add memory saver for checkpointing
-    memory = MemorySaver()
-    compiled_workflow = workflow.compile(checkpointer=memory)
+    # Choose checkpointer based on persistence requirement
+    if use_persistent_checkpoints:
+        # Use LocalFileCheckpointer for persistent state (no SQLite needed)
+        try:
+            from .local_checkpointer import LocalFileCheckpointer
+            checkpointer = LocalFileCheckpointer()
+            logger.info("✅ Using LocalFileCheckpointer (persistent, file-based)")
+        except ImportError:
+            logger.warning("⚠️  LocalFileCheckpointer not available, falling back to MemorySaver")
+            checkpointer = MemorySaver()
+    else:
+        # Use in-memory checkpointing (testing only)
+        checkpointer = MemorySaver()
+        logger.info("✅ Using in-memory checkpointing (temporary)")
 
-    logger.info("✅ Integrated workflow compiled with memory checkpointing")
+    compiled_workflow = workflow.compile(checkpointer=checkpointer)
+
+    logger.info("✅ Integrated workflow compiled with checkpointing enabled")
 
     return compiled_workflow
 
@@ -161,7 +179,8 @@ async def run_integrated_pipeline(
     use_web_search: bool = True,
     max_rounds: int = 3,
     min_consensus: float = 0.7,
-    thread_id: str = "default"
+    thread_id: str = None,
+    resume: bool = False
 ) -> AutoGITState:
     """
     Run the complete integrated Auto-GIT pipeline
@@ -172,26 +191,27 @@ async def run_integrated_pipeline(
         use_web_search: Enable web search
         max_rounds: Maximum debate rounds
         min_consensus: Minimum consensus score (0-1)
-        thread_id: Thread ID for checkpointing
+        thread_id: Thread ID for checkpointing (auto-generated if None)
+        resume: If True, attempt to resume from checkpoint
 
     Returns:
         Final state after pipeline execution
     """
-    logger.info(f"🚀 Starting Integrated Auto-GIT pipeline for: {idea}")
+    import uuid
+    
+    # Generate thread ID if not provided
+    if thread_id is None:
+        thread_id = str(uuid.uuid4())[:8]
+    
+    logger.info(f"🚀 Starting Integrated Auto-GIT pipeline")
+    logger.info(f"   Idea: {idea}")
+    logger.info(f"   Thread ID: {thread_id}")
+    logger.info(f"   Resume: {resume}")
 
-    # Create initial state
-    initial_state = create_initial_state(
-        idea=idea,
-        user_requirements=user_requirements,
-        use_web_search=use_web_search,
-        max_rounds=max_rounds,
-        min_consensus=min_consensus
-    )
+    # Compile workflow with persistent checkpointing
+    workflow = compile_integrated_workflow(use_persistent_checkpoints=True)
 
-    # Compile workflow
-    workflow = compile_integrated_workflow()
-
-    # Configure execution with recursion limit
+    # Configure execution with thread ID for checkpointing
     config = {
         "configurable": {
             "thread_id": thread_id
@@ -199,11 +219,40 @@ async def run_integrated_pipeline(
         "recursion_limit": 50  # Allow enough rounds for debate loop
     }
 
+    # If resuming, check if checkpoint exists
+    if resume:
+        logger.info("🔄 Attempting to resume from checkpoint...")
+        try:
+            # Get checkpoint state
+            checkpoint = workflow.get_state(config)
+            if checkpoint and checkpoint.values:
+                logger.info(f"✅ Found checkpoint! Resuming from: {checkpoint.values.get('current_stage', 'unknown')}")
+            else:
+                logger.info("⚠️  No checkpoint found, starting fresh")
+                resume = False
+        except Exception as e:
+            logger.warning(f"⚠️  Could not load checkpoint: {e}")
+            resume = False
+
+    # Create initial state (only used if not resuming)
+    if not resume:
+        initial_state = create_initial_state(
+            idea=idea,
+            user_requirements=user_requirements,
+            use_web_search=use_web_search,
+            max_rounds=max_rounds,
+            min_consensus=min_consensus
+        )
+    else:
+        initial_state = None  # Resume from checkpoint
+
     # Run the pipeline
     logger.info("▶️  Executing integrated pipeline...")
 
     try:
         final_state = None
+        
+        # Stream execution (automatically resumes if checkpoint exists)
         async for state in workflow.astream(initial_state, config):
             # state is a dict with node names as keys
             # Get the last state update
@@ -213,12 +262,91 @@ async def run_integrated_pipeline(
                 final_state = node_state
 
         logger.info("✅ Integrated pipeline execution complete!")
+        logger.info(f"   Checkpoint saved as thread_id: {thread_id}")
 
         return final_state
 
     except Exception as e:
         logger.error(f"❌ Pipeline execution failed: {e}")
+        logger.error(f"   You can resume with thread_id: {thread_id}")
         raise
+
+
+async def list_checkpoints() -> list:
+    """
+    List all available checkpoints
+    
+    Returns:
+        List of checkpoint info dicts
+    """
+    import sqlite3
+    from pathlib import Path
+    
+    db_path = Path("./data/checkpoints/langgraph_checkpoints.db")
+    
+    if not db_path.exists():
+        logger.info("No checkpoints database found")
+        return []
+    
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        # Get checkpoint info
+        cursor.execute("""
+            SELECT DISTINCT thread_id, checkpoint_id, created_at 
+            FROM checkpoints 
+            ORDER BY created_at DESC
+        """)
+        
+        checkpoints = []
+        for row in cursor.fetchall():
+            checkpoints.append({
+                "thread_id": row[0],
+                "checkpoint_id": row[1],
+                "created_at": row[2]
+            })
+        
+        conn.close()
+        
+        logger.info(f"Found {len(checkpoints)} checkpoint(s)")
+        return checkpoints
+        
+    except Exception as e:
+        logger.error(f"Error listing checkpoints: {e}")
+        return []
+
+
+async def delete_checkpoint(thread_id: str):
+    """
+    Delete a specific checkpoint
+    
+    Args:
+        thread_id: Thread ID to delete
+    """
+    import sqlite3
+    from pathlib import Path
+    
+    db_path = Path("./data/checkpoints/langgraph_checkpoints.db")
+    
+    if not db_path.exists():
+        logger.warning("No checkpoints database found")
+        return
+    
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+        conn.commit()
+        
+        deleted = cursor.rowcount
+        conn.close()
+        
+        logger.info(f"Deleted {deleted} checkpoint(s) for thread_id: {thread_id}")
+        
+    except Exception as e:
+        logger.error(f"Error deleting checkpoint: {e}")
 
 
 

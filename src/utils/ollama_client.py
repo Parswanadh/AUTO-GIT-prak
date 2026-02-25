@@ -67,11 +67,12 @@ class OllamaClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         stream: bool = False,
+        timeout: Optional[int] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
         Generate completion from Ollama model.
-        
+
         Args:
             model: Model name (e.g., "qwen3:8b")
             prompt: User prompt
@@ -79,26 +80,33 @@ class OllamaClient:
             temperature: Sampling temperature
             max_tokens: Max tokens to generate
             stream: Enable streaming
+            timeout: Request timeout in seconds (overrides default)
             **kwargs: Additional Ollama parameters
-        
+
         Returns:
             Response dict with content, model, tokens used
         """
         try:
             logger.debug(f"Generating with {model}: {prompt[:100]}...")
-            
+
             options = {
                 "temperature": temperature,
             }
             if max_tokens:
                 options["num_predict"] = max_tokens
-            
+
             options.update(kwargs)
-            
+
             if stream:
                 return await self._generate_stream(model, prompt, system, options)
-            
-            response = await self.client.generate(
+
+            # Use custom timeout if provided, otherwise use default
+            request_timeout = timeout if timeout is not None else self.timeout
+
+            # Create a new client with the custom timeout for this request
+            client = AsyncClient(host=self.base_url, timeout=request_timeout)
+
+            response = await client.generate(
                 model=model,
                 prompt=prompt,
                 system=system,
@@ -325,7 +333,7 @@ async def test_ollama_connection():
     
     if await client.health_check():
         models = await client.list_models()
-        logger.info(f"✅ Connected to Ollama: {len(models)} models available")
+        logger.info(f"[OK] Connected to Ollama: {len(models)} models available")
         
         for model in models[:5]:  # Show first 5
             name = model.get("name", "unknown")
@@ -334,5 +342,5 @@ async def test_ollama_connection():
         
         return True
     else:
-        logger.error("❌ Failed to connect to Ollama")
+        logger.error("[FAIL] Failed to connect to Ollama")
         return False

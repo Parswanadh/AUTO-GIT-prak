@@ -11,6 +11,13 @@ from typing import Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
+# Import local checkpointer (no Docker/Redis required)
+try:
+    from .local_checkpointer import LocalFileCheckpointer
+    PERSISTENT_STATE_ENABLED = True
+except ImportError:
+    PERSISTENT_STATE_ENABLED = False
+
 from .state import AutoGITState, create_initial_state
 from .nodes import (
     research_node,
@@ -23,9 +30,64 @@ from .nodes import (
     code_testing_node,
     git_publishing_node
 )
+from .web_research_node import web_research_node  # Integration #11
 
 logger = logging.getLogger(__name__)
 
+
+# ============================================
+# Performance Monitoring
+# ============================================
+
+def _print_performance_stats():
+    """Print cache and checkpoint performance statistics"""
+    import os
+    from pathlib import Path
+    
+    logger.info("=" * 70)
+    logger.info("Performance Summary")
+    logger.info("=" * 70)
+    
+    # Cache statistics
+    cache_dir = Path(".cache/llm")
+    if cache_dir.exists():
+        cache_files = list(cache_dir.glob("*.json"))
+        cache_size = sum(f.stat().st_size for f in cache_files)
+        
+        logger.info(f"\n📦 Cache Statistics:")
+        logger.info(f"   Location: {cache_dir}")
+        logger.info(f"   Entries: {len(cache_files)}")
+        logger.info(f"   Size: {cache_size / 1024:.2f} KB")
+        
+        if len(cache_files) > 0:
+            logger.info(f"   ✅ Local cache is working!")
+        else:
+            logger.info(f"   ℹ️  No cache entries yet (first run)")
+    else:
+        logger.info(f"\nℹ️  Cache: Not initialized yet")
+    
+    # Checkpoint statistics
+    checkpoint_dir = Path(".cache/checkpoints")
+    if checkpoint_dir.exists():
+        checkpoint_files = list(checkpoint_dir.glob("*.pkl"))
+        metadata_files = list(checkpoint_dir.glob("*.json"))
+        
+        if len(checkpoint_files) > 0:
+            checkpoint_size = sum(f.stat().st_size for f in checkpoint_files)
+            
+            logger.info(f"\n💾 Checkpoint Statistics:")
+            logger.info(f"   Location: {checkpoint_dir}")
+            logger.info(f"   Checkpoints: {len(checkpoint_files)}")
+            logger.info(f"   Metadata: {len(metadata_files)}")
+            logger.info(f"   Size: {checkpoint_size / 1024:.2f} KB")
+            logger.info(f"   ✅ Persistent state is working!")
+    
+    logger.info("\n" + "=" * 70)
+
+
+# ============================================
+# Workflow Routing
+# ============================================
 
 def should_continue_debate(state: AutoGITState) -> Literal["continue", "select"]:
     """
@@ -53,13 +115,15 @@ def build_workflow() -> StateGraph:
     Build the LangGraph StateGraph workflow
     
     Flow:
-    1. Research (web search)
-    2. Problem Extraction
-    3. Solution Generation → Critique → Consensus Check
-       └─ (loop back to 3 if no consensus)
-    4. Solution Selection
-    5. Code Generation
-    6. Git Publishing
+    1. Research (legacy ExtensiveResearcher with SearXNG)
+    2. **Web Research (NEW Integration #11: DuckDuckGo + arXiv)** ✨
+    3. Problem Extraction (now has access to research_report)
+    4. Solution Generation → Critique → Consensus Check
+       └─ (loop back to 4 if no consensus)
+    5. Solution Selection
+    6. Code Generation
+    7. Code Testing
+    8. Git Publishing
     
     Returns:
         Compiled StateGraph ready for execution
@@ -70,7 +134,8 @@ def build_workflow() -> StateGraph:
     workflow = StateGraph(AutoGITState)
     
     # Add nodes
-    workflow.add_node("research", research_node)
+    workflow.add_node("research", research_node)  # Legacy research
+    workflow.add_node("web_research", web_research_node)  # Integration #11 ✨
     workflow.add_node("problem_extraction", problem_extraction_node)
     workflow.add_node("solution_generation", solution_generation_node)
     workflow.add_node("critique", critique_node)
@@ -83,8 +148,9 @@ def build_workflow() -> StateGraph:
     # Define the flow
     workflow.set_entry_point("research")
     
-    # Linear flow through research and problem extraction
-    workflow.add_edge("research", "problem_extraction")
+    # Linear flow: research → web_research → problem_extraction
+    workflow.add_edge("research", "web_research")  # Integration #11: Add web research
+    workflow.add_edge("web_research", "problem_extraction")
     workflow.add_edge("problem_extraction", "solution_generation")
     
     # Debate loop
@@ -114,18 +180,23 @@ def build_workflow() -> StateGraph:
 
 def compile_workflow() -> StateGraph:
     """
-    Compile the workflow with memory persistence
+    Compile the workflow with persistent state management
     
     Returns:
         Compiled workflow ready for execution
     """
     workflow = build_workflow()
     
-    # Add memory saver for checkpointing
-    memory = MemorySaver()
-    compiled_workflow = workflow.compile(checkpointer=memory)
+    # Use local file checkpointer if available (persistent across restarts)
+    if PERSISTENT_STATE_ENABLED:
+        checkpointer = LocalFileCheckpointer()
+        logger.info("✅ Workflow compiled with persistent state (local files)")
+    else:
+        # Fallback to in-memory checkpointing
+        checkpointer = MemorySaver()
+        logger.info("✅ Workflow compiled with in-memory checkpointing")
     
-    logger.info("✅ Workflow compiled with memory checkpointing")
+    compiled_workflow = workflow.compile(checkpointer=checkpointer)
     
     return compiled_workflow
 
@@ -187,6 +258,9 @@ async def run_auto_git_pipeline(
                 final_state = node_state
         
         logger.info("✅ Pipeline execution complete!")
+        
+        # Print cache and checkpoint statistics
+        _print_performance_stats()
         
         return final_state
         

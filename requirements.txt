@@ -11,6 +11,7 @@ groq==0.4.1
 sentence-transformers==2.2.2
 torch>=2.0.0
 transformers>=4.30.0
+numpy>=1.24.0
 
 # LangGraph & LangChain (Production-grade orchestration)
 langgraph>=0.2.0
@@ -117,3 +118,22 @@ tiktoken>=0.5.0         # Token counting for cost tracking
 
 # Interactive prompts
 inquirer>=3.1.0        # For execution mode selection
+
+# ============================================
+# Agent Lightning Integration
+# ============================================
+
+# Microsoft Agent Lightning - Training & Optimization
+agentlightning>=0.3.0   # Agent training with RL & APO
+
+# OpenAI-compatible clients
+openai>=1.0.0          # For OpenRouter, Groq, and local models
+
+# Configuration Management
+pyyaml>=6.0.0          # YAML configuration files
+
+# Optional: Monitoring & Experiment Tracking
+# wandb>=0.15.0        # Weights & Biases for training metrics
+
+# Optional: Local Model Serving
+# vllm>=0.3.0          # High-performance local inference

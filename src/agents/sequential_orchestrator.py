@@ -27,6 +27,9 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 
 from src.utils.ollama_client import OllamaClient, get_ollama_client
+from src.llm.hybrid_router import HybridRouter
+from src.llm.multi_backend_manager import get_backend_manager
+from src.llm.free_tier_optimizer import get_free_tier_optimizer
 from src.utils.logger import get_logger
 from src.agents.personas import (
     PERSONA_CONFIGS,
@@ -100,14 +103,37 @@ class SequentialAgentOrchestrator:
     ROUTER_MODEL = "gemma2:2b"  # 1.6GB VRAM, for fast routing
     EMBEDDING_MODEL = "all-minilm:latest"  # 45MB VRAM
 
-    def __init__(self, ollama_client: Optional[OllamaClient] = None):
+    def __init__(
+        self,
+        ollama_client: Optional[OllamaClient] = None,
+        router: Optional[HybridRouter] = None,
+        use_multi_backend: bool = True
+    ):
         """
         Initialize sequential orchestrator.
 
         Args:
-            ollama_client: Ollama client (uses singleton if None)
+            ollama_client: Ollama client (uses singleton if None) - for backward compatibility
+            router: HybridRouter for multi-backend support (creates if None and use_multi_backend=True)
+            use_multi_backend: If True, use HybridRouter with free-tier optimization
         """
-        self.client = ollama_client or get_ollama_client()
+        self.use_multi_backend = use_multi_backend
+        
+        if use_multi_backend:
+            if router is None:
+                manager = get_backend_manager()
+                self.router = HybridRouter(manager)
+            else:
+                self.router = router
+            self.optimizer = get_free_tier_optimizer()
+            self.client = None  # Not used when multi-backend enabled
+            logger.info("SequentialAgentOrchestrator: Using multi-backend with free-tier optimization")
+        else:
+            self.client = ollama_client or get_ollama_client()
+            self.router = None
+            self.optimizer = None
+            logger.info("SequentialAgentOrchestrator: Using local Ollama only")
+        
         self._loaded_model = None
 
         logger.info(
@@ -156,30 +182,62 @@ class SequentialAgentOrchestrator:
         if max_tokens is None:
             max_tokens = PERSONA_CONFIGS[persona].max_tokens
 
-        # Generate with persona system prompt
-        response = await self.client.generate(
-            model=self.PRIMARY_MODEL,
-            prompt=prompt,
-            system=get_persona_prompt(persona),
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **kwargs
-        )
+        # Execute with multi-backend or local-only
+        if self.use_multi_backend and self.router:
+            # Use HybridRouter with free-tier optimization
+            optimal_backend = self.optimizer.get_optimal_backend(
+                task_type="reasoning",  # Personas typically do reasoning
+                prefer_speed=False
+            )
+            
+            messages = [
+                {"role": "system", "content": get_persona_prompt(persona)},
+                {"role": "user", "content": prompt}
+            ]
+            
+            result_obj = await self.router.generate_with_fallback(
+                task_type="reasoning",
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            if not result_obj or not result_obj.success:
+                logger.error(f"Multi-backend generation failed: {result_obj.error if result_obj else 'No result'}")
+                return {"content": "", "error": result_obj.error if result_obj else "Generation failed"}
+            
+            # Record usage
+            self.optimizer.record_usage(result_obj.backend, result_obj.model, result_obj.tokens)
+            
+            response_content = result_obj.content or ""
+            response_tokens = result_obj.tokens
+        else:
+            # Use local Ollama client (original behavior)
+            response = await self.client.generate(
+                model=self.PRIMARY_MODEL,
+                prompt=prompt,
+                system=get_persona_prompt(persona),
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs
+            )
+            response_content = response["content"]
+            response_tokens = response.get("tokens_used", 0)
 
         latency = time.time() - start_time
 
         result = {
-            "content": response["content"],
+            "content": response_content,
             "model": self.PRIMARY_MODEL,
             "persona": persona,
-            "tokens_used": response.get("eval_count", 0),
+            "tokens_used": response_tokens,
             "latency_seconds": latency,
-            "load_duration": response.get("load_duration", 0) / 1e9  # Convert to seconds
+            "load_duration": 0 if self.use_multi_backend else (response.get("load_duration", 0) / 1e9)
         }
 
         logger.info(
             f"[{persona}] Generated {result['tokens_used']} tokens "
-            f"in {latency:.2f}s (load: {result['load_duration']:.2f}s)"
+            f"in {latency:.2f}s"
         )
 
         return result

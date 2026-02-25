@@ -9,6 +9,12 @@ from typing import TypedDict, List, Dict, Optional, Annotated, Literal, Any
 from datetime import datetime
 import operator
 
+# Import research report types from Integration #11
+try:
+    from agents.research import ResearchReport
+except ImportError:
+    ResearchReport = None  # Optional if research module not available
+
 
 class PaperMetadata(TypedDict):
     """Metadata for a research paper"""
@@ -92,9 +98,13 @@ class AutoGITState(TypedDict):
     user_requirements: Optional[str]
     requirements: Optional[Dict[str, Any]]  # Structured requirements from conversation agent
     
-    # Research Context
+    # Research Context (Legacy - keeping for compatibility)
     research_context: Optional[ResearchContext]
     related_work_summary: Optional[str]
+    
+    # Integration #11: Enhanced Research (multi-source web + academic)
+    research_report: Optional[Any]  # ResearchReport from Integration #11
+    research_summary: Optional[str]  # Quick summary for prompts
     
     # Problem Extraction
     problems: List[str]
@@ -119,6 +129,17 @@ class AutoGITState(TypedDict):
     tests_passed: bool
     fix_attempts: int  # Number of times we've tried to fix code
     max_fix_attempts: int  # Maximum fix attempts before giving up
+
+    # Pipeline Self-Evaluation (Node 9.5)
+    self_eval_attempts: int   # How many self-eval reruns have been triggered so far
+    self_eval_score: float    # Latest holistic quality score (0-10), -1 if skipped
+
+    # Architecture Specification (Node 6.5) — pre-code-gen planning
+    architecture_spec: Optional[Dict[str, Any]]   # Structured spec JSON from architect_spec_node
+    _architecture_spec_text: Optional[str]         # Human-readable spec injected into code gen prompts
+
+    # Strategy Reasoner (Node 8.4) — reasoning-in-the-loop
+    _prev_fix_strategies: List[str]  # History of fix strategies tried (prevents repeats)
     
     # Git Publishing
     repo_name: Optional[str]
@@ -132,6 +153,9 @@ class AutoGITState(TypedDict):
     errors: Annotated[List[str], operator.add]  # Append-only error log
     warnings: Annotated[List[str], operator.add]  # Append-only warning log
     
+    # Dynamic expert perspectives (generated per-topic by LLM — overrides EXPERT_PERSPECTIVES)
+    dynamic_perspective_configs: Optional[List[Any]]  # List[PerspectiveConfig], set by generate_perspectives
+
     # Configuration
     use_web_search: bool
     max_debate_rounds: int
@@ -193,7 +217,7 @@ def create_initial_state(
     user_requirements: Optional[str] = None,
     requirements: Optional[Dict[str, Any]] = None,
     use_web_search: bool = True,
-    max_rounds: int = 3,
+    max_rounds: int = 2,
     min_consensus: float = 0.7
 ) -> AutoGITState:
     """
@@ -219,6 +243,10 @@ def create_initial_state(
         # Research Context
         research_context=None,
         related_work_summary=None,
+
+        # Integration #11 enhanced research (optional)
+        research_report=None,
+        research_summary=None,
         
         # Problem Extraction
         problems=[],
@@ -229,6 +257,9 @@ def create_initial_state(
         current_round=0,
         max_rounds=max_rounds,
         perspectives=[p["name"] for p in EXPERT_PERSPECTIVES],
+
+        # Dynamic perspectives (will be overwritten by perspective generation node)
+        dynamic_perspective_configs=None,
         
         # Solution Selection
         final_solution=None,
@@ -242,7 +273,18 @@ def create_initial_state(
         test_results=None,
         tests_passed=True,
         fix_attempts=0,
-        max_fix_attempts=6,  # Try to fix up to 6 times  # Default to True
+        max_fix_attempts=2,  # Try to fix up to 2 times (each cycle ~5-10 min)
+
+        # Self-Evaluation
+        self_eval_attempts=0,
+        self_eval_score=-1.0,
+
+        # Architecture Specification
+        architecture_spec=None,
+        _architecture_spec_text="",
+
+        # Strategy Reasoner
+        _prev_fix_strategies=[],
         
         # Git Publishing
         repo_name=None,

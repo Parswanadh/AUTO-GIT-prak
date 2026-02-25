@@ -1,0 +1,338 @@
+# Model Backend Configuration for Hybrid AI System
+# Supports local models, OpenRouter API, and Groq Cloud
+
+model_backends:
+  # Local Models via Ollama (OpenAI-compatible API)
+  # Enabled for parallel generation testing and fallback
+  local:
+    enabled: true
+    type: "openai_compatible"
+    endpoint: "http://localhost:11434/v1"
+    priority: 3  # Lower priority than cloud (cloud is faster)
+    models:
+      - name: "qwen3:8b"
+        task_types: 
+          - "code_generation"
+          - "planning"
+          - "reasoning"
+          - "general"
+        max_tokens: 4096
+        temperature: 0.7
+      
+      - name: "qwen3:4b"
+        task_types: 
+          - "code_generation"
+          - "debugging"
+        max_tokens: 4096
+        temperature: 0.7
+      
+      - name: "deepseek-coder-v2:16b"
+        task_types:
+          - "code_generation"
+          - "code_review"
+          - "refactoring"
+        max_tokens: 8192
+        temperature: 0.3
+
+  # OpenRouter API (Free Tier Models - 500-700 RPD)
+  openrouter:
+    enabled: true
+    type: "openai_compatible"
+    endpoint: "https://openrouter.ai/api/v1"
+    api_key: "${OPENROUTER_API_KEY}"
+    priority: 2
+    models:
+      # === TOP CODING MODELS ===
+      
+      # Qwen3 Coder 480B - Best for coding, 262K context
+      - name: "qwen/qwen3-coder:free"
+        task_types: 
+          - "code_generation"
+          - "refactoring"
+          - "code_review"
+          - "debugging"
+        max_tokens: 32000
+        temperature: 0.3
+      
+      # MiMo-V2-Flash - #1 on SWE-bench, comparable to Claude Sonnet 4.5
+      - name: "xiaomi/mimo-v2-flash:free"
+        task_types:
+          - "code_generation"
+          - "code_review"
+          - "software_engineering"
+          - "debugging"
+        max_tokens: 32000
+        temperature: 0.3
+      
+      # Devstral 2512 - Specialized for development, 262K context
+      - name: "mistralai/devstral-2512:free"
+        task_types:
+          - "code_generation"
+          - "development"
+          - "refactoring"
+        max_tokens: 32000
+        temperature: 0.4
+      
+      # === TOP REASONING MODELS ===
+      
+      # DeepSeek R1 - Latest reasoning model, 87.5% AIME 2025
+      # Note: 15-30s latency but exceptional reasoning
+      - name: "deepseek/deepseek-r1-0528:free"
+        task_types:
+          - "complex_reasoning"
+          - "math"
+          - "logic"
+          - "planning"
+        max_tokens: 16000
+        temperature: 0.7
+      
+      # TNG DeepSeek R1T2 - Optimized reasoning variant
+      - name: "tngtech/deepseek-r1t2-chimera:free"
+        task_types:
+          - "complex_reasoning"
+          - "analysis"
+          - "problem_solving"
+        max_tokens: 16000
+        temperature: 0.7
+      
+      # === GENERAL PURPOSE & WEB ===
+      
+      # Gemini 2.0 Flash - 1M+ context, best for web-scale tasks
+      - name: "google/gemini-2.0-flash-exp:free"
+        task_types:
+          - "general"
+          - "web_search"
+          - "documentation"
+          - "analysis"
+          - "validation"
+        max_tokens: 8192
+        temperature: 0.7
+      
+      # GLM 4.5 Air - Strong general-purpose, 131K context
+      - name: "z-ai/glm-4.5-air:free"
+        task_types:
+          - "general"
+          - "summarization"
+          - "classification"
+        max_tokens: 8192
+        temperature: 0.6
+      
+      # LLaMA 3.3 70B - Balanced coding & reasoning
+      - name: "meta-llama/llama-3.3-70b-instruct:free"
+        task_types:
+          - "code_generation"
+          - "reasoning"
+          - "general"
+          - "multilingual"
+        max_tokens: 8192
+        temperature: 0.7
+      
+      # === MULTIMODAL (VISION) ===
+      
+      # Qwen 2.5-VL - Vision-language tasks
+      - name: "qwen/qwen-2.5-vl-7b-instruct:free"
+        task_types:
+          - "vision"
+          - "image_analysis"
+          - "ocr"
+        max_tokens: 4096
+        temperature: 0.7
+
+  # Groq Cloud API (Fast Inference)
+  groq:
+    enabled: true
+    type: "openai_compatible"
+    endpoint: "https://api.groq.com/openai/v1"
+    api_key: "${GROQ_API_KEY}"
+    priority: 3
+    models:
+      # LLaMA 3.3 70B (Most capable)
+      - name: "llama-3.3-70b-versatile"
+        task_types: 
+          - "complex_reasoning"
+          - "critic"
+          - "debate"
+          - "planning"
+        max_tokens: 8192
+        temperature: 0.7
+      
+      # LLaMA 3.1 8B (Fast, efficient)
+      - name: "llama-3.1-8b-instant"
+        task_types:
+          - "code_generation"
+          - "simple_tasks"
+          - "validation"
+          - "code_review"
+          - "refactoring"
+        max_tokens: 4096
+        temperature: 0.5
+      
+      # Gemma 2 9B (Fast reasoning)
+      - name: "gemma2-9b-it"
+        task_types:
+          - "analysis"
+          - "validation"
+        max_tokens: 8192
+        temperature: 0.6
+
+# Hybrid Mode Configuration
+hybrid_mode:
+  enabled: true
+  
+  # Routing strategy: how to select backends
+  # Options: "cost_optimized", "latency_optimized", "quality_optimized", "balanced"
+  strategy: "balanced"
+  
+  # Fallback order when a backend fails
+  # Updated: Groq first (local disabled due to RAM constraints)
+  fallback_order: 
+    - "groq"       # Try Groq first (fast, reliable, working)
+    - "openrouter" # Then OpenRouter (diverse models)
+    - "local"      # Finally local (disabled, kept for future)
+  
+  # Intelligent routing rules based on task characteristics
+  routing_rules:
+    # High complexity tasks → Best models
+    - condition:
+        task_complexity: "high"
+        task_importance: "critical"
+      prefer: "groq"
+      model_hint: "llama-3.3-70b-versatile"
+    
+    # Code generation → Specialized models
+    - condition:
+        task_type: "code_generation"
+      prefer: "local"
+      model_hint: "deepseek-coder"
+    
+    # Fast tasks → Quick inference
+    - condition:
+        latency_requirement: "low"
+      prefer: "groq"
+      model_hint: "llama-3.1-8b-instant"
+    
+    # Batch tasks → Cost effective
+    - condition:
+        batch_size: ">10"
+      prefer: "local"
+    
+    # Medium complexity → Balanced
+    - condition:
+        task_complexity: "medium"
+      prefer: "local"
+    
+    # Low complexity → Free tier
+    - condition:
+        task_complexity: "low"
+      prefer: "openrouter"
+  
+  # Load balancing
+  load_balancing:
+    enabled: true
+    strategy: "round_robin"  # or "least_loaded", "random"
+  
+  # Retry configuration
+  retry:
+    max_attempts: 3
+    backoff_factor: 2
+    timeout_seconds: 60
+  
+  # Parallel execution for consensus/voting
+  parallel_execution:
+    enabled: false  # Enable when you want multi-model consensus
+    backends: ["local", "groq", "openrouter"]
+    voting_strategy: "majority"  # or "weighted", "unanimous"
+    min_agreements: 2
+
+# Cost tracking and limits
+cost_management:
+  enabled: true
+  
+  # Monthly budget limits (USD)
+  monthly_limits:
+    groq: 10.00
+    openrouter: 5.00
+    total: 15.00
+  
+  # Rate limits (requests per minute)
+  rate_limits:
+    local: 100
+    groq: 30
+    openrouter: 20
+  
+  # Logging
+  track_costs: true
+  cost_log_file: "logs/api_costs.json"
+
+# Training configuration (Agent Lightning)
+training:
+  enabled: true
+  
+  # Which backend to use for training
+  training_backend: "local"
+  
+  # Training algorithm
+  algorithm: "grpo"  # or "apo", "ppo"
+  
+  # Training hyperparameters
+  hyperparameters:
+    learning_rate: 1.0e-6
+    batch_size: 16
+    num_epochs: 10
+    gradient_accumulation_steps: 4
+    warmup_steps: 100
+  
+  # LoRA configuration (for efficient fine-tuning)
+  lora:
+    enabled: true
+    rank: 32
+    alpha: 64
+    dropout: 0.1
+  
+  # Store configuration
+  store:
+    type: "in_memory"  # or "mongodb", "postgres", "remote"
+    address: "http://localhost:4747"  # For remote store
+  
+  # Monitoring
+  wandb:
+    enabled: false
+    project: "auto-git-training"
+    entity: ""
+
+# Monitoring and observability
+monitoring:
+  enabled: true
+  
+  # Metrics to track
+  metrics:
+    - "latency"
+    - "token_usage"
+    - "error_rate"
+    - "cost"
+    - "success_rate"
+  
+  # Logging
+  log_level: "INFO"
+  log_file: "logs/hybrid_backend.log"
+  
+  # Alerts
+  alerts:
+    enabled: false
+    email: ""
+    slack_webhook: ""
+
+# Feature flags
+features:
+  # Enable caching of responses
+  response_caching: true
+  cache_ttl_seconds: 3600
+  
+  # Enable prompt optimization
+  prompt_optimization: true
+  
+  # Enable automatic model selection
+  auto_model_selection: true
+  
+  # Enable A/B testing
+  ab_testing: false

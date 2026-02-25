@@ -1,0 +1,303 @@
+# Model RAM Usage Configuration
+# =============================================================================
+# This file defines RAM requirements for different models to ensure optimal
+# resource allocation when running alongside SearXNG.
+#
+# SearXNG RAM Usage: ~150-200MB (Docker container)
+# Target: Keep total RAM under 4GB for smooth operation
+# =============================================================================
+
+model_ram_profiles:
+  # Small models - suitable for running with SearXNG
+  # Total RAM: ~1.5-2.5GB (model + SearXNG)
+  small:
+    max_model_ram: 2048  # MB
+    recommended_for:
+      - query_understanding
+      - result_validation
+      - synthesis
+      - relevance_scoring
+    models:
+      # OpenRouter Free Tier - Small Models
+      - name: "qwen/qwen-2.5-vl-7b-instruct:free"
+        estimated_ram: 1800  # 7B model
+        context_window: 32000
+        strengths: ["vision", "understanding", "fast"]
+        
+      - name: "z-ai/glm-4.5-air:free"
+        estimated_ram: 1500  # Lightweight
+        context_window: 128000
+        strengths: ["fast", "efficient", "general"]
+        
+      - name: "google/gemini-2.0-flash-exp:free"
+        estimated_ram: 0  # API-based, no local RAM
+        context_window: 1000000
+        strengths: ["large_context", "fast", "web"]
+        
+      # Local Models (if using vLLM)
+      - name: "qwen3:4b"
+        estimated_ram: 1200
+        context_window: 8192
+        strengths: ["fast", "local", "coding"]
+        
+      - name: "llama3.2:3b"
+        estimated_ram: 1000
+        context_window: 4096
+        strengths: ["fast", "local", "general"]
+
+  # Medium models - use when SearXNG not running or more RAM available
+  # Total RAM: ~4-8GB
+  medium:
+    max_model_ram: 6144  # MB
+    recommended_for:
+      - code_generation
+      - reasoning
+      - detailed_analysis
+    models:
+      - name: "meta-llama/llama-3.3-70b-instruct:free"
+        estimated_ram: 0  # API-based
+        context_window: 128000
+        strengths: ["reasoning", "instruction_following"]
+        
+      - name: "deepseek-coder-v2:16b"
+        estimated_ram: 5000
+        context_window: 16384
+        strengths: ["coding", "technical"]
+
+  # Large models - use for final generation when high quality needed
+  # Avoid running simultaneously with SearXNG unless 16GB+ RAM
+  large:
+    max_model_ram: 16384  # MB
+    recommended_for:
+      - final_code_generation
+      - comprehensive_review
+      - publication_ready_output
+    models:
+      - name: "qwen/qwen3-coder:free"
+        estimated_ram: 0  # API-based (480B params)
+        context_window: 262144
+        strengths: ["massive_context", "coding", "architecture"]
+        
+      - name: "xiaomi/mimo-v2-flash:free"
+        estimated_ram: 0  # API-based
+        context_window: 128000
+        strengths: ["swe_bench", "code_quality"]
+        
+      - name: "deepseek/deepseek-r1-0528:free"
+        estimated_ram: 0  # API-based
+        context_window: 64000
+        strengths: ["reasoning", "math", "complex_logic"]
+
+# Task-Based Model Selection
+# When to use which model size
+task_model_mapping:
+  # Research phase - use small models
+  research_query_understanding:
+    model_size: small
+    reason: "Query analysis is fast task, doesn't need large model"
+    recommended_models:
+      - "z-ai/glm-4.5-air:free"
+      - "google/gemini-2.0-flash-exp:free"
+    
+  research_result_validation:
+    model_size: small
+    reason: "Validating search results is simple classification"
+    recommended_models:
+      - "qwen/qwen-2.5-vl-7b-instruct:free"
+      - "z-ai/glm-4.5-air:free"
+    
+  research_synthesis:
+    model_size: small
+    reason: "Summarizing findings doesn't require heavy reasoning"
+    recommended_models:
+      - "google/gemini-2.0-flash-exp:free"  # Large context helps
+      - "z-ai/glm-4.5-air:free"
+  
+  # Code generation - use medium/large models
+  code_generation:
+    model_size: large
+    reason: "Code quality benefits from larger, specialized models"
+    recommended_models:
+      - "qwen/qwen3-coder:free"  # Best coding model
+      - "xiaomi/mimo-v2-flash:free"  # SWE-bench winner
+      - "mistralai/devstral-2512:free"  # Development specialist
+    
+  code_review:
+    model_size: large
+    reason: "Thorough review requires deep understanding"
+    recommended_models:
+      - "deepseek/deepseek-r1-0528:free"  # Strong reasoning
+      - "qwen/qwen3-coder:free"  # Understands code architecture
+    
+  # Problem analysis - use medium models
+  problem_extraction:
+    model_size: medium
+    reason: "Understanding requirements needs good reasoning"
+    recommended_models:
+      - "meta-llama/llama-3.3-70b-instruct:free"
+      - "deepseek/deepseek-r1-0528:free"
+  
+  debate_participation:
+    model_size: medium
+    reason: "Debate requires reasoning but not extreme depth"
+    recommended_models:
+      - "tngtech/deepseek-r1t2-chimera:free"
+      - "meta-llama/llama-3.3-70b-instruct:free"
+
+# Resource Management Rules
+resource_management:
+  # When SearXNG is running
+  searxng_active:
+    max_concurrent_models: 1
+    model_size_limit: small
+    fallback_strategy: "queue"
+    reasoning: "SearXNG uses 150-200MB, leave room for model"
+    
+  # When SearXNG is idle
+  searxng_idle:
+    max_concurrent_models: 2
+    model_size_limit: large
+    fallback_strategy: "parallel"
+    reasoning: "Full resources available for models"
+    
+  # System RAM thresholds
+  ram_thresholds:
+    # Below 4GB: Only small models + SearXNG
+    low: 4096
+    use_profile: small
+    
+    # 4-8GB: Medium models or small with SearXNG
+    medium: 8192
+    use_profile: medium
+    
+    # Above 8GB: All models available
+    high: 16384
+    use_profile: large
+
+# Optimization Strategies
+optimization:
+  # Model loading strategy
+  model_loading:
+    strategy: "lazy"  # Load models on-demand
+    cache_models: false  # Don't keep models in memory
+    unload_after: 300  # Seconds of inactivity
+    
+  # SearXNG optimization
+  searxng:
+    keep_alive: true  # Keep container running
+    restart_on_error: true
+    timeout: 30  # Seconds
+    
+  # Request batching
+  batching:
+    enabled: true
+    max_batch_size: 5
+    max_wait_time: 2  # Seconds
+    
+  # Caching
+  caching:
+    search_results: true
+    ttl: 3600  # 1 hour
+    llm_responses: true
+    llm_ttl: 1800  # 30 minutes
+
+# Usage Examples
+examples:
+  research_workflow:
+    description: "Extensive research with SearXNG + small model"
+    steps:
+      - step: 1
+        action: "Start SearXNG"
+        command: "docker start searxng"
+        ram_usage: 200
+        
+      - step: 2
+        action: "Understand research requirements"
+        model: "z-ai/glm-4.5-air:free"
+        ram_usage: 0  # API-based
+        task: "query_understanding"
+        
+      - step: 3
+        action: "Execute searches with SearXNG"
+        model: null
+        ram_usage: 200  # Just SearXNG
+        
+      - step: 4
+        action: "Validate results"
+        model: "qwen/qwen-2.5-vl-7b-instruct:free"
+        ram_usage: 0  # API-based
+        task: "result_validation"
+        
+      - step: 5
+        action: "Synthesize findings"
+        model: "google/gemini-2.0-flash-exp:free"
+        ram_usage: 0  # API-based
+        task: "synthesis"
+        
+    total_ram: 200  # MB (all models are API-based!)
+    
+  code_generation_workflow:
+    description: "Generate code after research (SearXNG can stop)"
+    steps:
+      - step: 1
+        action: "Stop SearXNG if RAM limited"
+        command: "docker stop searxng"
+        ram_freed: 200
+        
+      - step: 2
+        action: "Generate code with best model"
+        model: "qwen/qwen3-coder:free"
+        ram_usage: 0  # API-based
+        task: "code_generation"
+        
+      - step: 3
+        action: "Review code with reasoning model"
+        model: "deepseek/deepseek-r1-0528:free"
+        ram_usage: 0  # API-based
+        task: "code_review"
+        
+    total_ram: 0  # MB (all API-based, SearXNG stopped)
+
+# Model Selection Algorithm
+selection_algorithm: |
+  def select_model_for_task(task, searxng_running, available_ram):
+      # Get task configuration
+      task_config = task_model_mapping[task]
+      required_size = task_config['model_size']
+      
+      # Check if SearXNG is running
+      if searxng_running:
+          # Reserve 200MB for SearXNG
+          available_ram -= 200
+          
+      # Select model based on available RAM and task
+      if required_size == 'small':
+          # Prefer API-based models (0 RAM)
+          return task_config['recommended_models'][0]
+      elif required_size == 'medium':
+          if available_ram >= 4096:
+              return task_config['recommended_models'][0]
+          else:
+              # Fallback to small model
+              return 'z-ai/glm-4.5-air:free'
+      elif required_size == 'large':
+          # All large models are API-based in our config
+          return task_config['recommended_models'][0]
+      
+      # Default
+      return 'google/gemini-2.0-flash-exp:free'
+
+# Notes
+notes: |
+  KEY INSIGHT: With OpenRouter free tier models, most models are API-based
+  and use 0 local RAM! This means you can run SearXNG (~200MB) with ANY model
+  without RAM concerns.
+  
+  The only RAM consideration is if you're using local vLLM models alongside
+  SearXNG. In that case, use small models (3B-7B) that fit in remaining RAM.
+  
+  Recommended setup:
+  1. Use SearXNG for research (200MB RAM)
+  2. Use OpenRouter API models (0 local RAM) for all LLM tasks
+  3. Total RAM usage: ~200-500MB (SearXNG + Python overhead)
+  4. This works even on 4GB systems!

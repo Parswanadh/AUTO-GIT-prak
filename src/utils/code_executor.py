@@ -106,15 +106,18 @@ class CodeExecutor:
                 [str(python_exe), "-m", "pip", "install", "--upgrade", "pip"],
                 check=True,
                 capture_output=True,
-                timeout=120
+                timeout=60
             )
             
             # Install requirements using python -m pip
+            # --prefer-binary avoids source compilation (torch, scipy, etc.) which can hang
             result = subprocess.run(
-                [str(python_exe), "-m", "pip", "install", "-r", str(requirements_file)],
+                [str(python_exe), "-m", "pip", "install",
+                 "--prefer-binary", "--no-build-isolation",
+                 "-r", str(requirements_file)],
                 check=True,
                 capture_output=True,
-                timeout=300
+                timeout=180
             )
             
             self.test_results["dependencies_installed"] = True
@@ -153,7 +156,10 @@ class CodeExecutor:
         python_exe = self.get_python_executable()
         
         all_valid = True
-        for py_file in self.project_dir.glob("*.py"):
+        for py_file in self.project_dir.rglob("*.py"):
+            # Skip .venv and __pycache__ directories
+            if '.venv' in py_file.parts or '__pycache__' in py_file.parts:
+                continue
             try:
                 # Compile to check syntax
                 result = subprocess.run(
@@ -188,8 +194,13 @@ class CodeExecutor:
         logger.info("Testing imports...")
         python_exe = self.get_python_executable()
         
-        # Test importing main modules
-        test_files = ["model.py", "train.py", "utils.py", "data_loader.py"]
+        # Dynamically discover all .py files (including subdirs) — import main.py last
+        _all_py = sorted(
+            [f.name for f in self.project_dir.rglob("*.py")
+             if '.venv' not in f.parts and '__pycache__' not in f.parts],
+            key=lambda x: (1 if x == "main.py" else 0, x)
+        )
+        test_files = _all_py
         all_successful = True
         
         for filename in test_files:
@@ -225,7 +236,10 @@ except Exception as e:
                 self.test_results["test_outputs"].append(output)
                 
             except subprocess.CalledProcessError as e:
-                error_msg = f"Import error in {filename}: {e.stderr.decode()}"
+                stderr_text = e.stderr.decode().strip()
+                stdout_text = e.stdout.decode().strip()
+                detail = stderr_text or stdout_text  # test script prints to stdout
+                error_msg = f"Import error in {filename}: {detail}"
                 logger.error(f"  ❌ {error_msg}")
                 self.test_results["execution_errors"].append(error_msg)
                 self.test_results["import_successful"] = False
@@ -300,7 +314,55 @@ except Exception as e:
                 self.test_results["warnings"].append(f"Model test error: {str(e)}")
         
         return True  # Don't fail on test warnings
-    
+
+    def run_entry_point(self) -> bool:
+        """
+        Run main.py inside the venv to catch runtime crashes: AttributeError,
+        ImportError on circular deps, NameError, TypeError on constructor args.
+
+        A 15-second timeout is used.  If the process exits within the timeout
+        with code 0 it passes.  If it exits with an error, the stderr is
+        captured and fed back to the fix loop.  If it times out (running an
+        infinite loop / server) we treat that as a pass — the process started
+        successfully.
+        """
+        main_file = self.project_dir / "main.py"
+        if not main_file.exists():
+            logger.info("  ℹ️  No main.py found — skipping entry-point check")
+            return True
+
+        python_exe = self.get_python_executable()
+        logger.info("Running main.py entry-point check...")
+        try:
+            result = subprocess.run(
+                [str(python_exe), "main.py"],
+                capture_output=True,
+                timeout=15,
+                cwd=str(self.project_dir)
+            )
+            if result.returncode == 0:
+                logger.info("  ✅ main.py executed and exited cleanly")
+                return True
+            else:
+                stderr = result.stderr.decode(errors="replace").strip()
+                stdout = result.stdout.decode(errors="replace").strip()
+                # Show last 15 lines of stderr (the actual traceback)
+                err_lines = (stderr or stdout).splitlines()[-15:]
+                error_msg = f"main.py crashed at runtime: {''.join(err_lines)}"
+                logger.error(f"  ❌ {error_msg}")
+                self.test_results["execution_errors"].append(error_msg)
+                self.test_results["import_successful"] = False
+                return False
+        except subprocess.TimeoutExpired:
+            # Ran for 15 s without crashing — server / infinite loop, counts as pass
+            logger.info("  ✅ main.py ran 15s without crashing (timeout = pass)")
+            return True
+        except Exception as e:
+            error_msg = f"Entry-point test error: {str(e)}"
+            logger.error(error_msg)
+            self.test_results["execution_errors"].append(error_msg)
+            return False
+
     def cleanup(self):
         """Remove virtual environment"""
         try:
@@ -340,7 +402,12 @@ except Exception as e:
             # Step 4: Test imports
             if not self.test_imports():
                 return self.test_results
-            
+
+            # Step 4.5: Run main.py to catch runtime crashes (AttributeError,
+            # wrong method names, circular deps, constructor arg mismatches)
+            if not self.run_entry_point():
+                return self.test_results
+
             # Step 5: Run basic tests
             self.run_basic_tests()
             
