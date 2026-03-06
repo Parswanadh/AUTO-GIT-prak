@@ -32,8 +32,9 @@ import asyncio
 import logging
 import gc
 import time
+import threading
 from collections import defaultdict
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Set
 from langchain_core.language_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,60 @@ TOKEN_STATS: Dict[str, Any] = {
     "by_model": defaultdict(int),   # model → total_tokens
     "by_profile": defaultdict(int), # profile → total_tokens
     "call_log": [],                 # list of {model, profile, prompt, completion, total, elapsed_s}
+    "estimated_cost_usd": 0.0,     # cumulative estimated cost
+    "cost_by_model": defaultdict(float),  # model → estimated cost
 }
+
+# ── Cost per 1M tokens (input, output) — approximate Feb 2026 pricing ─────────
+# Free models = 0, Groq = 0 (free tier), OpenAI/paid OpenRouter = actual costs.
+# Format: model_substring → (input_cost_per_1M, output_cost_per_1M)
+MODEL_COSTS: Dict[str, tuple] = {
+    # Free models (OpenRouter :free suffix, Groq)
+    ":free":                  (0.0, 0.0),
+    "compound-beta":          (0.0, 0.0),        # Groq free
+    "llama-3.1-8b-instant":   (0.0, 0.0),        # Groq free
+    "llama-3.3-70b-versatile":(0.0, 0.0),        # Groq free
+    # Paid OpenRouter / DeepSeek
+    "deepseek-v3.2":          (0.30, 0.88),       # DeepSeek V3.2 — $0.30/1M in, $0.88/1M out
+    "minimax-m2.5":           (0.0, 0.0),         # MiniMax M2.5 — free tier
+    "nemotron-3-nano-30b":    (0.20, 0.20),       # Nvidia Nemotron 3 Nano — paid
+    "deepseek-chat":          (0.14, 0.28),       # DeepSeek V3 base pricing
+    "deepseek-chat-v3-0324":  (0.14, 0.28),       # $0.14/1M in, $0.28/1M out
+    "deepseek-r1-0528":       (0.55, 2.19),       # $0.55/1M in, $2.19/1M out
+    "deepseek-r1":            (0.55, 2.19),       # R1 family
+    # Google Gemini
+    "gemini-2.0-flash":       (0.10, 0.40),       # $0.10/1M in, $0.40/1M out
+    "gemini-2.0-flash-001":   (0.10, 0.40),       # $0.10/1M in, $0.40/1M out
+    "gemini-2.5-flash":       (0.15, 0.60),       # $0.15/1M in, $0.60/1M out
+    "gemini":                 (0.10, 0.40),       # Gemini family fallback
+    # Qwen / Phi
+    "qwen3-coder":            (0.30, 0.30),       # $0.30/1M in+out
+    "qwen":                   (0.0, 0.0),         # Local Ollama qwen
+    "phi-4-reasoning-plus":   (0.07, 0.07),       # $0.07/1M
+    "phi":                    (0.0, 0.0),         # Local Ollama phi
+    # OpenAI
+    "gpt-4o-mini":            (0.15, 0.60),       # $0.15/1M in, $0.60/1M out
+    "gpt-5-nano":             (0.10, 0.40),       # estimated
+    "gpt-4o":                 (2.50, 10.00),      # $2.50/1M in, $10.00/1M out
+    # Ollama local
+    "ollama":                 (0.0, 0.0),
+}
+
+
+def _estimate_cost(model_name: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Estimate USD cost for a single LLM call based on model pricing."""
+    name_lower = model_name.lower()
+    # Match longest substring
+    best_match = ""
+    best_costs = (0.0, 0.0)
+    for pattern, costs in MODEL_COSTS.items():
+        if pattern in name_lower and len(pattern) > len(best_match):
+            best_match = pattern
+            best_costs = costs
+    # Calculate cost
+    input_cost = (prompt_tokens / 1_000_000) * best_costs[0]
+    output_cost = (completion_tokens / 1_000_000) * best_costs[1]
+    return input_cost + output_cost
 
 # ── Timeout tracking (per session) ────────────────────────────────────────────
 TIMEOUT_STATS: Dict[str, int] = {}   # model_key → number of timeouts this session
@@ -84,8 +138,10 @@ MODEL_TIMEOUT_OVERRIDES: Dict[str, int] = {
     # ── Cheap paid models (fast by design) ────────────────────────────
     "gemini-2.0-flash":  30,   # Google Gemini Flash — very fast
     "gemini-2.5-flash":  45,   # Gemini 2.5 Flash — slightly slower
-    "phi-4-reasoning":   60,   # Phi-4 reasoning — small but chain-of-thought
-    "deepseek-chat":     45,   # DeepSeek Chat v3 — fast paid model
+
+    "deepseek-chat":     90,   # DeepSeek Chat v3 — fast but big prompts need time
+    "deepseek-v3":       180,   # DeepSeek V3/V3.2 — primary model, large arch prompts need 2-3 min
+    "minimax-m2":        120,   # MiniMax M2.5 — fallback, can be slow on big prompts
     # ── Large MoE models ──────────────────────────────────────────
     # 235B-480B MoE models: routing overhead + generation = 60-90s typical
     "qwen3-coder":     90,   # 480B MoE, 35B active
@@ -97,7 +153,6 @@ MODEL_TIMEOUT_OVERRIDES: Dict[str, int] = {
     "qwen3-32b":       50,
     "nemotron-3-nano": 45,
     # ── Small / fast / flash models ───────────────────────────────────
-    "gpt-oss-20b":     35,
     "trinity-mini":    35,  # 26B MoE, 3B active
     "llama-3.1-8b":    25,
     "gemma2:2b":       20,
@@ -147,6 +202,8 @@ def get_token_stats() -> Dict[str, Any]:
         "total_tokens": TOKEN_STATS["total_tokens"],
         "by_model": dict(TOKEN_STATS["by_model"]),
         "by_profile": dict(TOKEN_STATS["by_profile"]),
+        "estimated_cost_usd": TOKEN_STATS.get("estimated_cost_usd", 0.0),
+        "cost_by_model": dict(TOKEN_STATS.get("cost_by_model", {})),
     }
 
 def print_token_summary():
@@ -159,16 +216,20 @@ def print_token_summary():
     print(f"  Prompt tokens : {s['prompt_tokens']:,}")
     print(f"  Output tokens : {s['completion_tokens']:,}")
     print(f"  Total tokens  : {s['total_tokens']:,}")
+    total_cost = s.get("estimated_cost_usd", 0.0)
+    print(f"  Est. cost     : ${total_cost:.4f} USD")
     if s["by_profile"]:
         print("\n  By profile:")
         for profile, n in sorted(s["by_profile"].items(), key=lambda x: -x[1]):
             print(f"    {profile:<12} {n:>8,} tokens")
     if s["by_model"]:
         print("\n  By model (top 10):")
+        cost_by_model = s.get("cost_by_model", {})
         for model, n in sorted(s["by_model"].items(), key=lambda x: -x[1])[:10]:
-            display = model if len(model) <= 50 else "…" + model[-49:]
-            print(f"    {display:<50} {n:>8,}")
-    # Rough cost estimate (free models = $0, groq $0, openai ~0.075/1M)
+            display = model if len(model) <= 45 else "…" + model[-44:]
+            cost = cost_by_model.get(model, 0.0)
+            cost_str = f"${cost:.4f}" if cost > 0 else "  free"
+            print(f"    {display:<45} {n:>8,} {cost_str}")
     print("═" * 60 + "\n")
 
 logger = logging.getLogger(__name__)
@@ -280,9 +341,16 @@ class ModelManager:
       reasoning - deep analysis, consensus scoring
     """
 
-    CALL_TIMEOUT_S = 45            # seconds before we give up on a slow model
-                                   # (code gen can legitimately take 30-40s for large files)
-    RATE_LIMIT_COOLDOWN = 60       # seconds to cool down a 429'd model (1 min)
+    CALL_TIMEOUT_S = 120           # seconds before we give up on a slow model
+                                   # (code gen can take 60-90s for large files with full prompts)
+    RATE_LIMIT_COOLDOWN = 60       # BASE cooldown for first 429 (seconds)
+    RATE_LIMIT_MAX_COOLDOWN = 600  # max cooldown after repeated 429s (10 min)
+
+    # Circuit breaker: if N+ models from the same provider fail with connection errors
+    # within CIRCUIT_BREAKER_WINDOW seconds, skip ALL remaining models from that provider.
+    CIRCUIT_BREAKER_THRESHOLD = 2   # 2 connection errors → skip the provider
+    CIRCUIT_BREAKER_WINDOW = 120    # 2-minute window
+    CIRCUIT_BREAKER_COOLDOWN = 300  # skip provider for 5 minutes
 
     # ── Candidate lists ───────────────────────────────────────────────────────
     # Priority strategy (Feb 2026):
@@ -311,16 +379,22 @@ class ModelManager:
     CLOUD_CONFIGS = {
         # ── fast: simple extraction, validation, consensus scoring ────────────
         # Want: small models, quick turnaround, no need for frontier quality.
+        # Small/fast models are FINE here — we're doing JSON extraction, not code gen.
         "fast": [
-            # FREE tier (tried first)
-            ("openrouter",      "nvidia/nemotron-3-nano-30b-a3b:free",       0.4),
-            ("openrouter",      "arcee-ai/trinity-mini:free",                0.4),
-            ("openrouter",      "meta-llama/llama-3.3-70b-instruct:free",    0.4),
-            ("openrouter",      "stepfun/step-3.5-flash:free",               0.4),
-            # PAID tier (opt-in: OPENROUTER_PAID=true) — ~$0.07-0.14/1M
-            ("openrouter_paid", "microsoft/phi-4-reasoning-plus",            0.4),  # $0.07/1M, fast small reasoning
-            ("openrouter_paid", "deepseek/deepseek-chat-v3-0324",            0.4),  # $0.14/1M, very fast quality
-            ("openrouter_paid", "google/gemini-2.0-flash-001",               0.4),  # $0.10/1M, 1M ctx, blazing fast
+            # PRIMARY — DeepSeek V3.2 (paid, no rate limits, frontier quality)
+            ("openrouter_paid", "deepseek/deepseek-v3.2",                    0.4),
+            # FALLBACK 1 — MiniMax M2.5 (free, strong quality)
+            ("openrouter",      "minimax/minimax-m2.5",                      0.4),
+            # FALLBACK 2 — Nvidia Nemotron 3 Nano (paid)
+            ("openrouter_paid", "nvidia/nemotron-3-nano-30b-a3b",            0.4),
+            # FREE tier — small & fast (quality doesn't matter much for extraction)
+            ("openrouter",      "arcee-ai/trinity-mini:free",                0.4),  # 26B MoE/3B active, fast
+            ("openrouter",      "nvidia/nemotron-3-nano-30b-a3b:free",       0.4),  # 30B MoE/3B active
+            ("openrouter",      "stepfun/step-3.5-flash:free",               0.4),  # 196B MoE, flash-class
+            ("openrouter",      "meta-llama/llama-3.3-70b-instruct:free",    0.4),  # 70B backup
+            # PAID tier — cheap, blazing fast (when free models are all 429'd)
+            ("openrouter_paid", "google/gemini-2.0-flash-001",               0.4),  # $0.10/1M, fastest
+            ("openrouter_paid", "deepseek/deepseek-chat-v3-0324",            0.4),  # $0.14/1M
             # Groq pool (expanded to groq_0, groq_1… at init time)
             ("groq",            "llama-3.1-8b-instant",                      0.4),
             ("groq",            "llama-3.3-70b-versatile",                   0.4),
@@ -328,18 +402,21 @@ class ModelManager:
             ("ollama",          "gemma2:2b",                                 0.4),
         ],
         # ── balanced: problem extraction, solution gen, most nodes ────────────
+        # Quality matters here — no 3B slop models. Paid fallback after free.
         "balanced": [
-            # FREE tier
-            ("openrouter",      "nvidia/nemotron-3-nano-30b-a3b:free",       0.7),
-            ("openrouter",      "meta-llama/llama-3.3-70b-instruct:free",    0.7),
-            ("openrouter",      "stepfun/step-3.5-flash:free",               0.7),
-            ("openrouter",      "arcee-ai/trinity-large-preview:free",       0.7),
-            ("openrouter",      "qwen/qwen3-coder:free",                     0.7),
-            ("openrouter",      "arcee-ai/trinity-mini:free",                0.7),
-            # PAID tier (opt-in)
-            ("openrouter_paid", "deepseek/deepseek-chat-v3-0324",            0.7),  # $0.14/1M, top balanced model
+            # PRIMARY — DeepSeek V3.2 (paid, no rate limits, frontier quality)
+            ("openrouter_paid", "deepseek/deepseek-v3.2",                    0.7),
+            # FALLBACK 1 — MiniMax M2.5 (free, strong quality)
+            ("openrouter",      "minimax/minimax-m2.5",                      0.7),
+            # FALLBACK 2 — Nvidia Nemotron 3 Nano (paid)
+            ("openrouter_paid", "nvidia/nemotron-3-nano-30b-a3b",            0.7),
+            # FREE tier — quality models only (70B+ or large MoE)
+            ("openrouter",      "meta-llama/llama-3.3-70b-instruct:free",    0.7),  # 70B, reliable
+            ("openrouter",      "qwen/qwen3-coder:free",                     0.7),  # 480B MoE coder
+            ("openrouter",      "arcee-ai/trinity-large-preview:free",       0.7),  # 400B MoE
+            # PAID tier — cheap, immediate fallback when free are 429'd
+            ("openrouter_paid", "deepseek/deepseek-chat-v3-0324",            0.7),  # $0.14/1M, fast + quality
             ("openrouter_paid", "google/gemini-2.0-flash-001",               0.7),  # $0.10/1M, 1M ctx
-            ("openrouter_paid", "qwen/qwen3-coder",                          0.7),  # $0.30/1M, paid 480B coder
             # Groq pool
             ("groq",            "llama-3.3-70b-versatile",                   0.7),
             ("groq",            "llama-3.1-8b-instant",                      0.7),
@@ -347,33 +424,43 @@ class ModelManager:
             ("ollama",          "phi4-mini:3.8b",                            0.7),
         ],
         # ── powerful: code generation, architecture design ────────────────────
+        # CRITICAL: Only quality models here. 3B slop (trinity-mini, nemotron-nano)
+        # produces truncated/garbled code. Paid models are cheap insurance.
         "powerful": [
-            # FREE tier
-            ("openrouter",      "qwen/qwen3-coder:free",                     0.7),  # 480B code specialist
-            ("openrouter",      "nvidia/nemotron-3-nano-30b-a3b:free",       0.7),
-            ("openrouter",      "meta-llama/llama-3.3-70b-instruct:free",    0.7),
-            ("openrouter",      "arcee-ai/trinity-large-preview:free",       0.7),
-            ("openrouter",      "stepfun/step-3.5-flash:free",               0.7),
-            ("openrouter",      "arcee-ai/trinity-mini:free",                0.7),
-            # PAID tier (opt-in) — use for code gen when free models are rate-limited
-            ("openrouter_paid", "qwen/qwen3-coder",                          0.7),  # $0.30/1M, 480B paid (faster than :free)
-            ("openrouter_paid", "deepseek/deepseek-chat-v3-0324",            0.7),  # $0.14/1M, excellent coder
-            ("openrouter_paid", "google/gemini-2.5-flash",                   0.7),  # $0.15/1M, fast + long ctx
+            # PRIMARY — DeepSeek V3.2 (paid, no rate limits, frontier quality)
+            ("openrouter_paid", "deepseek/deepseek-v3.2",                    0.7),
+            # FALLBACK 1 — MiniMax M2.5 (free, strong quality)
+            ("openrouter",      "minimax/minimax-m2.5",                      0.7),
+            # FALLBACK 2 — Nvidia Nemotron 3 Nano (paid)
+            ("openrouter_paid", "nvidia/nemotron-3-nano-30b-a3b",            0.7),
+            # FREE tier — large models only (70B+ or 400B+ MoE)
+            ("openrouter",      "qwen/qwen3-coder:free",                     0.7),  # 480B MoE, best free coder
+            ("openrouter",      "arcee-ai/trinity-large-preview:free",       0.7),  # 400B MoE, 13B active
+            ("openrouter",      "meta-llama/llama-3.3-70b-instruct:free",    0.7),  # 70B, solid quality
+            # PAID tier — immediate fallback (NOT behind more free slop models)
+            ("openrouter_paid", "deepseek/deepseek-chat-v3-0324",            0.7),  # $0.14/1M, fast + excellent code
+            ("openrouter_paid", "google/gemini-2.5-flash",                   0.7),  # $0.15/1M, 1M ctx, fast
+            ("openrouter_paid", "qwen/qwen3-coder",                          0.7),  # $0.30/1M, 480B paid (faster)
             # Groq pool
             ("groq",            "llama-3.3-70b-versatile",                   0.7),
             ("openai",          "gpt-4o-mini",                               0.7),
             ("ollama",          "qwen2.5-coder:7b",                          0.7),
         ],
         # ── reasoning: critique, debate, consensus ────────────────────────────
+        # Need quality reasoning — no 3B models. phi-4-reasoning-plus is dead (404).
         "reasoning": [
-            # FREE tier
-            ("openrouter",      "arcee-ai/trinity-large-preview:free",       0.6),
-            ("openrouter",      "stepfun/step-3.5-flash:free",               0.6),
-            ("openrouter",      "nvidia/nemotron-3-nano-30b-a3b:free",       0.6),
-            ("openrouter",      "meta-llama/llama-3.3-70b-instruct:free",    0.6),
-            # PAID tier (opt-in) — faster reasoning when R1 free is overloaded
-            ("openrouter_paid", "deepseek/deepseek-r1-0528",                 0.6),  # $0.55/1M, much faster than :free
-            ("openrouter_paid", "microsoft/phi-4-reasoning-plus",            0.6),  # $0.07/1M, strong small reasoner
+            # PRIMARY — DeepSeek V3.2 (paid, no rate limits, frontier quality)
+            ("openrouter_paid", "deepseek/deepseek-v3.2",                    0.6),
+            # FALLBACK 1 — MiniMax M2.5 (free, strong quality)
+            ("openrouter",      "minimax/minimax-m2.5",                      0.6),
+            # FALLBACK 2 — Nvidia Nemotron 3 Nano (paid)
+            ("openrouter_paid", "nvidia/nemotron-3-nano-30b-a3b",            0.6),
+            # FREE tier — large models with reasoning ability
+            ("openrouter",      "arcee-ai/trinity-large-preview:free",       0.6),  # 400B MoE, strong analysis
+            ("openrouter",      "meta-llama/llama-3.3-70b-instruct:free",    0.6),  # 70B, reliable
+            # PAID tier — reasoning specialists
+            ("openrouter_paid", "deepseek/deepseek-r1-0528",                 0.6),  # $0.55/1M, best reasoner
+            ("openrouter_paid", "deepseek/deepseek-chat-v3-0324",            0.6),  # $0.14/1M, good reasoning
             # Groq pool
             ("groq",            "llama-3.3-70b-versatile",                   0.6),
             ("groq",            "llama-3.1-8b-instant",                      0.6),
@@ -384,6 +471,12 @@ class ModelManager:
         # ⚠️  Groq compound-beta STAYS FIRST: unique built-in live web search.
         "research": [
             ("groq",            "compound-beta",                             0.3),  # live web search
+            # PRIMARY — DeepSeek V3.2 (paid, immediate fallback after compound-beta)
+            ("openrouter_paid", "deepseek/deepseek-v3.2",                    0.5),
+            # FALLBACK 1 — MiniMax M2.5 (free, strong quality)
+            ("openrouter",      "minimax/minimax-m2.5",                      0.5),
+            # FALLBACK 2 — Nvidia Nemotron 3 Nano (paid)
+            ("openrouter_paid", "nvidia/nemotron-3-nano-30b-a3b",            0.5),
             # Fallbacks without web search
             ("openrouter",      "arcee-ai/trinity-large-preview:free",       0.5),
             ("openrouter",      "stepfun/step-3.5-flash:free",               0.5),
@@ -404,6 +497,16 @@ class ModelManager:
         # Health cache: model_key → (error_type, expires_at)
         # error_type: "permanent" (404) or "temporary" (429)
         self._health_cache: Dict[str, tuple] = {}
+        self._health_lock = threading.Lock()  # async-safe via GIL + lock
+
+        # Progressive backoff: model_key → consecutive 429 count
+        # Used to compute exponential cooldown: BASE * 2^(count-1), capped at MAX
+        self._rate_limit_strikes: Dict[str, int] = {}
+
+        # Circuit breaker: provider_base → list of failure timestamps
+        self._provider_failures: Dict[str, list] = defaultdict(list)
+        # provider_base → expires_at (when the circuit breaker resets)
+        self._provider_tripped: Dict[str, float] = {}
 
         openrouter_key  = bool(_get_env("OPENROUTER_API_KEY"))
         openai_key      = bool(_get_env("OPENAI_API_KEY"))
@@ -442,30 +545,91 @@ class ModelManager:
     def _model_key(self, provider: str, model_name: str) -> str:
         return f"{provider}/{model_name}"
 
-    def _is_healthy(self, provider: str, model_name: str) -> bool:
-        """Return True if the model is not currently blacklisted."""
-        key = self._model_key(provider, model_name)
-        if key not in self._health_cache:
-            return True
-        error_type, expires_at = self._health_cache[key]
-        if error_type == "permanent":
-            return False   # 404 — never retry
-        if time.time() < expires_at:
-            return False   # still in cooldown
-        # Cooldown expired — remove from cache
-        del self._health_cache[key]
+    def _provider_base(self, provider: str) -> str:
+        """Extract base provider name: 'groq_2' → 'groq', 'openrouter' → 'openrouter'."""
+        if provider.startswith("groq_"):
+            return "groq"  # all groq keys share same infrastructure
+        if provider == "openrouter_paid":
+            return "openrouter"  # same API endpoint
+        return provider
+
+    def _is_provider_tripped(self, provider: str) -> bool:
+        """Return True if the circuit breaker has tripped for this provider."""
+        base = self._provider_base(provider)
+        if base not in self._provider_tripped:
+            return False
+        if time.time() >= self._provider_tripped[base]:
+            del self._provider_tripped[base]
+            self._provider_failures.pop(base, None)
+            logger.info(f"  🔄 Circuit breaker reset for {base}")
+            return False
         return True
 
-    def _mark_dead(self, provider: str, model_name: str, is_permanent: bool):
-        """Mark a model as temporarily or permanently unavailable."""
+    def _record_provider_failure(self, provider: str, is_connection_error: bool):
+        """Record a connection failure and trip circuit breaker if threshold reached."""
+        if not is_connection_error:
+            return
+        base = self._provider_base(provider)
+        now = time.time()
+        # Prune old failures outside the window
+        self._provider_failures[base] = [
+            t for t in self._provider_failures[base]
+            if now - t < self.CIRCUIT_BREAKER_WINDOW
+        ]
+        self._provider_failures[base].append(now)
+        if len(self._provider_failures[base]) >= self.CIRCUIT_BREAKER_THRESHOLD:
+            self._provider_tripped[base] = now + self.CIRCUIT_BREAKER_COOLDOWN
+            logger.warning(
+                f"  ⚡ Circuit breaker TRIPPED for {base} — "
+                f"skipping all {base} models for {self.CIRCUIT_BREAKER_COOLDOWN}s"
+            )
+
+    def _is_healthy(self, provider: str, model_name: str) -> bool:
+        """Return True if the model is not currently blacklisted."""
+        # Circuit breaker check: skip entire provider if tripped
+        if self._is_provider_tripped(provider):
+            return False
         key = self._model_key(provider, model_name)
-        if is_permanent:
-            self._health_cache[key] = ("permanent", float("inf"))
-            logger.warning(f"  🚫 [{key}] marked DEAD (404, will skip forever this session)")
-        else:
-            expires_at = time.time() + self.RATE_LIMIT_COOLDOWN
-            self._health_cache[key] = ("temporary", expires_at)
-            logger.info(f"  ⏳ [{key}] rate-limited, cooling down {self.RATE_LIMIT_COOLDOWN}s")
+        with self._health_lock:
+            if key not in self._health_cache:
+                return True
+            error_type, expires_at = self._health_cache[key]
+            if error_type == "permanent":
+                return False   # 404 — never retry
+            if time.time() < expires_at:
+                return False   # still in cooldown
+            # Cooldown expired — remove from cache (but keep strike count
+            # so next 429 gets longer cooldown via progressive backoff)
+            del self._health_cache[key]
+            return True
+
+    def _mark_dead(self, provider: str, model_name: str, is_permanent: bool):
+        """Mark a model as temporarily or permanently unavailable.
+
+        For temporary (429) errors, uses progressive backoff:
+          1st hit → 60s, 2nd → 120s, 3rd → 240s, 4th → 480s, cap at 600s.
+        This prevents the thrashing pattern where a model is retried after
+        60s cooldown and immediately 429s again.
+        """
+        key = self._model_key(provider, model_name)
+        with self._health_lock:
+            if is_permanent:
+                self._health_cache[key] = ("permanent", float("inf"))
+                logger.warning(f"  🚫 [{key}] marked DEAD (404, will skip forever this session)")
+            else:
+                # Progressive backoff: double cooldown on each successive 429
+                strikes = self._rate_limit_strikes.get(key, 0) + 1
+                self._rate_limit_strikes[key] = strikes
+                cooldown = min(
+                    self.RATE_LIMIT_COOLDOWN * (2 ** (strikes - 1)),
+                    self.RATE_LIMIT_MAX_COOLDOWN,
+                )
+                expires_at = time.time() + cooldown
+                self._health_cache[key] = ("temporary", expires_at)
+                logger.info(
+                    f"  ⏳ [{key}] rate-limited, cooling down {cooldown:.0f}s "
+                    f"(strike {strikes}, next={min(cooldown*2, self.RATE_LIMIT_MAX_COOLDOWN):.0f}s)"
+                )
 
     def _get_model_timeout(self, model_name: str) -> int:
         """
@@ -549,7 +713,7 @@ class ModelManager:
         }
 
     def _has_key(self, provider: str) -> bool:
-        if provider == "openrouter":
+        if provider in ("openrouter", "openrouter_paid"):
             return bool(_get_env("OPENROUTER_API_KEY"))
         if provider == "openai":
             return bool(_get_env("OPENAI_API_KEY"))
@@ -558,7 +722,7 @@ class ModelManager:
         return True  # ollama – always available
 
     def _build(self, provider: str, model_name: str, temperature: float) -> BaseChatModel:
-        if provider == "openrouter":
+        if provider in ("openrouter", "openrouter_paid"):
             return _build_openrouter_model(model_name, temperature)
         if provider == "openai":
             return _build_openai_model(model_name, temperature)
@@ -584,16 +748,19 @@ def _is_retryable(exc: Exception) -> bool:
     """Return True if this is a skip-and-retry error (rate limit, quota, 404, etc.)."""
     msg = str(exc).lower()
     return any(s in msg for s in [
-        "429", "402", "404", "524", "503", "502", "529",
+        "429", "402", "404", "500", "524", "503", "502", "529",
         "rate limit", "rate_limit", "ratelimit",
         "data policy", "spend limit", "temporarily",
         "quota", "too many requests", "overloaded",
         "timeout", "timed out", "context deadline",
         "no endpoints found",
+        "internal server error", "server error",
         "decommissioned", "deprecated", "no longer supported",
         "connection error", "connection reset", "connection refused",
         "connectionerror", "remotedisconnected", "broken pipe",
         "network", "ssl", "eof occurred",
+        "bad gateway", "service unavailable",
+        "unauthorized", "401",
     ])
 
 def _is_permanent_error(exc: Exception) -> bool:
@@ -617,9 +784,21 @@ class FallbackLLM:
         self.profile = profile
 
     async def ainvoke(self, messages, **kwargs):
+        # ── Per-call timeout override ────────────────────────────────────────
+        # Callers can pass timeout=240 to override model-specific timeouts.
+        # This is essential for large prompts (architect_spec, code_gen) where
+        # the default 120s is insufficient.
+        _caller_timeout = kwargs.pop("timeout", None)
+
         candidates = self.manager.CLOUD_CONFIGS.get(self.profile, [])
         last_exc: Optional[Exception] = None
         t0_total = time.time()
+
+        # ── Max consecutive timeout limit ────────────────────────────────────
+        # If N models timeout in a row on the same prompt, the prompt is too
+        # big/complex for any model in the chain.  Stop wasting time.
+        MAX_CONSECUTIVE_TIMEOUTS = 3
+        _consecutive_timeouts = 0
 
         # Outer retry loop: if ALL models fail with network errors, wait and retry
         for _network_attempt in range(3):
@@ -638,13 +817,23 @@ class FallbackLLM:
                 if not self.manager._is_healthy(provider, model_name):
                     continue
 
+                # ── Stop cascade if too many consecutive timeouts ────────
+                if _consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+                    logger.warning(
+                        f"  🛑 [{self.profile}] {_consecutive_timeouts} consecutive "
+                        f"timeouts — prompt likely too large for remaining models, "
+                        f"stopping fallback cascade"
+                    )
+                    break
+
                 t0 = time.time()
                 try:
                     logger.debug(f"  [{self.profile}] trying {provider}/{model_name}…")
                     llm = self.manager._build(provider, model_name, temperature)
 
                     # Per-model dynamic timeout (reasoning models need 300s, flash need 25s)
-                    _timeout = self.manager._get_model_timeout(model_name)
+                    # Caller override takes precedence if provided.
+                    _timeout = _caller_timeout or self.manager._get_model_timeout(model_name)
                     response = await asyncio.wait_for(
                         llm.ainvoke(messages, **kwargs),
                         timeout=_timeout,
@@ -665,14 +854,31 @@ class FallbackLLM:
                             )
                         except Exception:
                             pass
+                    # ── Empty response guard ─────────────────────────────
+                    # Free-tier models sometimes return 200 OK with empty content.
+                    # Treat as failure and try the next model in the cascade.
+                    content = getattr(response, "content", None) or ""
+                    if isinstance(content, str) and len(content.strip()) < 10:
+                        logger.warning(
+                            f"  ⚠️ [{self.profile}] {provider}/{model_name} returned "
+                            f"empty/trivial response ({len(content)} chars), trying next"
+                        )
+                        last_exc = RuntimeError(f"{provider}/{model_name} returned empty response")
+                        _all_network = False
+                        continue
+
                     logger.info(f"  ✅ [{self.profile}] {provider}/{model_name} ({elapsed:.1f}s)")
+                    _consecutive_timeouts = 0  # reset on success
                     return response
 
                 except asyncio.TimeoutError:
                     elapsed = time.time() - t0
-                    _timeout_used = self.manager._get_model_timeout(model_name)
+                    _timeout_used = _caller_timeout or self.manager._get_model_timeout(model_name)
+                    _consecutive_timeouts += 1
                     logger.warning(
-                        f"  ⏱️ [{self.profile}] {provider}/{model_name} timed out after {elapsed:.0f}s (limit={_timeout_used}s), skipping"
+                        f"  ⏱️ [{self.profile}] {provider}/{model_name} timed out after "
+                        f"{elapsed:.0f}s (limit={_timeout_used}s), skipping "
+                        f"[cascade {_consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS}]"
                     )
                     _mkey = self.manager._model_key(provider, model_name)
                     TIMEOUT_STATS[_mkey] = TIMEOUT_STATS.get(_mkey, 0) + 1
@@ -684,15 +890,17 @@ class FallbackLLM:
                     if _is_retryable(exc):
                         is_perm = _is_permanent_error(exc)
                         self.manager._mark_dead(provider, model_name, is_permanent=is_perm)
+                        # Check if this is a connection-level error → feed circuit breaker
+                        _is_conn = any(s in str(exc).lower() for s in
+                                       ["connection", "network", "ssl", "remotedisconnected",
+                                        "broken pipe", "eof", "503", "502"])
+                        self.manager._record_provider_failure(provider, _is_conn)
                         logger.warning(
                             f"  ⚠️ [{self.profile}] {provider}/{model_name} skipped "
                             f"({'dead' if is_perm else '429/net'}: {str(exc)[:70]})"
                         )
                         last_exc = exc
-                        # Only keep _all_network=True if this looks like a connection error
-                        if not any(s in str(exc).lower() for s in
-                                   ["connection", "network", "ssl", "remotedisconnected",
-                                    "broken pipe", "eof"]):
+                        if not _is_conn:
                             _all_network = False
                         continue
                     raise  # hard non-retryable error — propagate
@@ -748,6 +956,10 @@ def _track_tokens(provider: str, model_name: str, profile: str, response, elapse
         TOKEN_STATS["total_tokens"] += tt
         TOKEN_STATS["by_model"][f"{provider}/{model_name}"] += tt
         TOKEN_STATS["by_profile"][profile] += tt
+        # Cost tracking
+        cost = _estimate_cost(model_name, pt, ct)
+        TOKEN_STATS["estimated_cost_usd"] += cost
+        TOKEN_STATS["cost_by_model"][f"{provider}/{model_name}"] += cost
         TOKEN_STATS["call_log"].append({
             "model": f"{provider}/{model_name}",
             "profile": profile,
@@ -755,6 +967,7 @@ def _track_tokens(provider: str, model_name: str, profile: str, response, elapse
             "completion_tokens": ct,
             "total_tokens": tt,
             "elapsed_s": round(elapsed, 2),
+            "cost_usd": round(cost, 6),
         })
     except Exception:
         # Never crash the pipeline due to tracking
@@ -764,11 +977,6 @@ def _track_tokens(provider: str, model_name: str, profile: str, response, elapse
 # ── Singleton ──────────────────────────────────────────────────────────────
 
 _manager: Optional[ModelManager] = None
-
-
-def get_model_manager() -> ModelManager:
-    """Return the global ModelManager singleton."""
-    global _manager
 
 
 def get_profile_primary(profile: str) -> str:

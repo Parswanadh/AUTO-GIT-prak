@@ -121,7 +121,7 @@ class AutoGITState(TypedDict):
     selection_reasoning: Optional[str]
     
     # Code Generation
-    generated_code: List[GeneratedCode]
+    generated_code: Dict[str, Any]  # {"files": {filename: content}, "approach": str, ...}
     implementation_notes: Optional[str]
     
     # Code Testing
@@ -134,18 +134,24 @@ class AutoGITState(TypedDict):
     self_eval_attempts: int   # How many self-eval reruns have been triggered so far
     self_eval_score: float    # Latest holistic quality score (0-10), -1 if skipped
 
+    # Goal Achievement Evaluation (Node 9.9)
+    goal_eval_attempts: int    # How many goal-eval regen loops have been triggered
+    goal_eval_report: Optional[Dict[str, Any]]   # Per-requirement goal evaluation result
+
     # Architecture Specification (Node 6.5) — pre-code-gen planning
     architecture_spec: Optional[Dict[str, Any]]   # Structured spec JSON from architect_spec_node
     _architecture_spec_text: Optional[str]         # Human-readable spec injected into code gen prompts
 
     # Strategy Reasoner (Node 8.4) — reasoning-in-the-loop
     _prev_fix_strategies: List[str]  # History of fix strategies tried (prevents repeats)
+    _prev_error_hashes: List[str]    # Error hashes from prior fix iterations (for dedup/escalation)
+    _auto_fixed_errors: List[str]    # Errors auto-fixed by deterministic fixers (for tracer)
     
     # Git Publishing
     repo_name: Optional[str]
     commit_message: Optional[str]
     published: bool
-    publication_url: Optional[str]
+    github_url: Optional[str]  # V8 FIX: renamed from publication_url to match nodes.py usage
     
     # Metadata
     pipeline_start_time: str
@@ -266,18 +272,22 @@ def create_initial_state(
         selection_reasoning=None,
         
         # Code Generation
-        generated_code=[],
+        generated_code={},
         implementation_notes=None,
         
         # Code Testing
         test_results=None,
         tests_passed=True,
         fix_attempts=0,
-        max_fix_attempts=2,  # Try to fix up to 2 times (each cycle ~5-10 min)
+        max_fix_attempts=4,  # Try to fix up to 4 times (deterministic fixers make early rounds fast)
 
         # Self-Evaluation
         self_eval_attempts=0,
         self_eval_score=-1.0,
+
+        # Goal Achievement Evaluation (V14 FIX: was missing)
+        goal_eval_attempts=0,
+        goal_eval_report=None,
 
         # Architecture Specification
         architecture_spec=None,
@@ -285,12 +295,14 @@ def create_initial_state(
 
         # Strategy Reasoner
         _prev_fix_strategies=[],
+        _prev_error_hashes=[],
+        _auto_fixed_errors=[],
         
         # Git Publishing
         repo_name=None,
         commit_message=None,
         published=False,
-        publication_url=None,
+        github_url=None,  # V8 FIX: match field name
         
         # Metadata
         pipeline_start_time=datetime.now().isoformat(),

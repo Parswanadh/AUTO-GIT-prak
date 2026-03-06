@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 
 # ── All pipeline nodes in execution order ─────────────────────────────────────
 _ALL_NODES: List[str] = [
+    "requirements_extraction",
     "research",
     "generate_perspectives",
     "problem_extraction",
@@ -38,9 +39,13 @@ _ALL_NODES: List[str] = [
     "critique",
     "consensus_check",
     "solution_selection",
+    "architect_spec",
     "code_generation",
+    "code_review_agent",
     "code_testing",
+    "strategy_reasoner",
     "code_fixing",
+    "pipeline_self_eval",
     "git_publishing",
 ]
 
@@ -68,6 +73,8 @@ class PipelineTracer:
         # Per-node tracking
         self._call_count:  Dict[str, int]   = {}   # node_name → total invocations
         self._last_event:  float            = time.time()    # timestamp of last event
+        self._node_timings: Dict[str, List[float]] = {}  # node_name → list of durations (s)
+        self._pipeline_start: float         = time.time()    # wall clock start
 
         # Accumulated full pipeline state (LangGraph yields only deltas per node)
         self._full_state:  Dict[str, Any]   = {"idea": idea}
@@ -115,6 +122,8 @@ class PipelineTracer:
         now = time.time()
         elapsed = round(now - self._last_event, 2)
         self._last_event = now
+        # Accumulate per-node timing
+        self._node_timings.setdefault(node_name, []).append(elapsed)
 
         errors = self._full_state.get("errors") or []
         if not isinstance(errors, list): errors = []
@@ -212,9 +221,62 @@ class PipelineTracer:
         # Write human-readable agent status Markdown
         self._write_status_md(token_stats, health)
 
+        # Print per-node profiling summary
+        self.print_profiling_summary()
+
         print(f"\n📋 Trace  saved → {self.trace_path}")
         print(f"⚕️  Health saved → {self.health_path}")
         print(f"🤖 Status saved → {self.status_path}")
+
+    # ── Per-node profiling ────────────────────────────────────────────────────
+
+    def get_profiling_data(self) -> Dict[str, Any]:
+        """Return structured per-node profiling data."""
+        total_wall = time.time() - self._pipeline_start
+        data: Dict[str, Any] = {"total_wall_s": round(total_wall, 2), "nodes": {}}
+        for node_name, durations in self._node_timings.items():
+            total = sum(durations)
+            data["nodes"][node_name] = {
+                "calls": len(durations),
+                "total_s": round(total, 2),
+                "avg_s": round(total / len(durations), 2) if durations else 0,
+                "max_s": round(max(durations), 2) if durations else 0,
+                "pct_of_total": round(100.0 * total / total_wall, 1) if total_wall > 0 else 0,
+            }
+        return data
+
+    def print_profiling_summary(self) -> None:
+        """Print a formatted per-node profiling summary to stdout."""
+        data = self.get_profiling_data()
+        total_wall = data["total_wall_s"]
+        nodes = data.get("nodes", {})
+        if not nodes:
+            return
+
+        print("\n" + "═" * 60)
+        print("  ⏱️  PER-NODE PROFILING SUMMARY")
+        print("═" * 60)
+        print(f"  {'Node':<25s} {'Calls':>5s} {'Total':>8s} {'Avg':>8s} {'Max':>8s} {'%':>6s}")
+        print(f"  {'─'*25} {'─'*5} {'─'*8} {'─'*8} {'─'*8} {'─'*6}")
+
+        # Sort by total time descending
+        sorted_nodes = sorted(nodes.items(), key=lambda x: -x[1]["total_s"])
+        for name, info in sorted_nodes:
+            total_s = info["total_s"]
+            avg_s = info["avg_s"]
+            max_s = info["max_s"]
+            pct = info["pct_of_total"]
+            calls = info["calls"]
+            # Format times nicely
+            total_f = f"{total_s:.1f}s" if total_s < 60 else f"{total_s/60:.1f}m"
+            avg_f = f"{avg_s:.1f}s" if avg_s < 60 else f"{avg_s/60:.1f}m"
+            max_f = f"{max_s:.1f}s" if max_s < 60 else f"{max_s/60:.1f}m"
+            print(f"  {name:<25s} {calls:>5d} {total_f:>8s} {avg_f:>8s} {max_f:>8s} {pct:>5.1f}%")
+
+        total_f = f"{total_wall:.1f}s" if total_wall < 60 else f"{total_wall/60:.1f}m"
+        print(f"  {'─'*25} {'─'*5} {'─'*8} {'─'*8} {'─'*8} {'─'*6}")
+        print(f"  {'TOTAL':<25s} {'':>5s} {total_f:>8s}")
+        print("═" * 60 + "\n")
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
@@ -323,10 +385,31 @@ class PipelineTracer:
             vr = state.get("validation_results") or {}
             if not isinstance(vr, dict): vr = {}
             errs = vr.get("errors") or []
+            # Also count execution_errors from test_results (runtime crashes,
+            # static-check failures, etc.) — previously these were invisible
+            # because only validation_results.errors was counted.
+            _tr = state.get("test_results") or {}
+            if not isinstance(_tr, dict): _tr = {}
+            _exec_errs = _tr.get("execution_errors") or []
+            _validation_err_count = len(errs) if isinstance(errs, list) else 0
+            _execution_err_count  = len(_exec_errs) if isinstance(_exec_errs, list) else 0
             summary["fix_attempts"]  = state.get("fix_attempts", 0)
             summary["tests_passed"]  = state.get("tests_passed", None)
-            summary["errors_found"]  = len(errs) if isinstance(errs, list) else 0
+            summary["errors_found"]  = _validation_err_count + _execution_err_count
+            summary["validation_errors"] = _validation_err_count
+            summary["execution_errors"]  = _execution_err_count
             summary["syntax_ok"]     = vr.get("syntax_valid", None)
+
+            # Track deterministic auto-fixer effectiveness
+            _auto_fixed = state.get("_auto_fixed_errors") or []
+            if isinstance(_auto_fixed, list) and _auto_fixed:
+                summary["auto_fixed_errors"] = len(_auto_fixed)
+                summary["auto_fixed_types"] = list(set(
+                    e.split(":")[0].strip() if ":" in str(e) else str(e)[:60]
+                    for e in _auto_fixed[:20]
+                ))
+            else:
+                summary["auto_fixed_errors"] = 0
 
         elif node_name == "git_publishing":
             summary["github_repo"] = state.get("github_repo", "")
@@ -350,12 +433,18 @@ class PipelineTracer:
 
         # ── Pipeline node execution table ──────────────────────────────────
         lines.append("## 📊 Pipeline Node Execution\n")
-        lines.append("| # | Node | Status | Calls |")
-        lines.append("|---|------|--------|-------|")
+        lines.append("| # | Node | Status | Calls | Time | % |")
+        lines.append("|---|------|--------|-------|------|---|")
+        profiling = self.get_profiling_data()
+        prof_nodes = profiling.get("nodes", {})
         for i, node in enumerate(_ALL_NODES, 1):
             calls  = self._call_count.get(node, 0)
             status = "✅ ran" if calls > 0 else "⬜ not reached"
-            lines.append(f"| {i} | `{node}` | {status} | {calls} |")
+            pn = prof_nodes.get(node, {})
+            time_s = pn.get("total_s", 0)
+            pct    = pn.get("pct_of_total", 0)
+            time_f = f"{time_s:.1f}s" if time_s < 60 else f"{time_s/60:.1f}m"
+            lines.append(f"| {i} | `{node}` | {status} | {calls} | {time_f} | {pct:.1f}% |")
 
         # ── Token usage ────────────────────────────────────────────────────
         lines.append("\n## 🧠 LLM Token Usage\n")

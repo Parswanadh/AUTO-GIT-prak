@@ -77,22 +77,25 @@ Respond in JSON format:
         # Show thinking spinner if visible
         if self.visible:
             with console.status("[dim italic]Thinking...[/dim italic]", spinner="dots"):
-                # TODO: Call LLM with thinking prompt
-                await asyncio.sleep(1)  # Placeholder
-                
-                # Mock response for now
-                result = {
-                    "reasoning": "User wants to generate code. I need to research, debate solutions, and generate code.",
-                    "plan": [
-                        "Search arXiv for relevant papers",
-                        "Search GitHub for implementations",
-                        "Run multi-agent debate",
-                        "Generate code based on consensus",
-                        "Validate and test code"
-                    ],
-                    "confidence": 0.85,
-                    "decision": "Execute full auto-git pipeline"
-                }
+                try:
+                    from src.utils.model_manager import get_fallback_llm
+                    from langchain_core.messages import HumanMessage
+                    llm = get_fallback_llm("fast")
+                    response = await llm.ainvoke([HumanMessage(content=thinking_prompt)])
+                    raw = response.content.strip()
+                    # Try to parse JSON from response
+                    import re as _re_think
+                    raw = _re_think.sub(r"^```[a-z]*\n?", "", raw)
+                    raw = _re_think.sub(r"\n?```$", "", raw.strip())
+                    result = json.loads(raw)
+                except Exception as e:
+                    # Fallback to basic plan
+                    result = {
+                        "reasoning": f"Planning response to: {prompt[:100]}",
+                        "plan": ["Analyze request", "Execute appropriate action", "Return results"],
+                        "confidence": 0.7,
+                        "decision": "Execute user request"
+                    }
         else:
             result = {
                 "reasoning": "Internal reasoning hidden",
@@ -176,62 +179,312 @@ class MCPServerManager:
         return config.get("mcpServers", {})
     
     async def initialize_servers(self):
-        """Initialize all MCP servers"""
+        """Initialize all MCP servers via subprocess + JSON-RPC 2.0"""
         server_configs = await self.load_config()
         
         console.print("[cyan]🔌 Initializing MCP Servers...[/cyan]\n")
         
         for name, config in server_configs.items():
             try:
-                # TODO: Actually start MCP server process
+                import subprocess
+                import shutil
+                
+                cmd = config.get("command", "python")
+                args_list = config.get("args", [])
+                full_cmd = [cmd] + args_list
+                
+                # Check if the command exists
+                if not shutil.which(cmd):
+                    console.print(f"  ✗ {name}: command '{cmd}' not found")
+                    self.servers[name] = {
+                        "config": config,
+                        "status": "error",
+                        "error": f"Command '{cmd}' not found",
+                        "process": None,
+                        "tools": [],
+                    }
+                    continue
+                
+                # Start MCP server as a subprocess with stdio transport
+                proc = subprocess.Popen(
+                    full_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+                
+                # Send JSON-RPC initialize request
+                init_request = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "auto-git", "version": "1.0.0"},
+                    },
+                })
+                
+                try:
+                    proc.stdin.write(init_request + "\n")
+                    proc.stdin.flush()
+                    
+                    # Read response with timeout
+                    import select
+                    import platform
+                    if platform.system() == "Windows":
+                        # Windows doesn't support select on pipes, use threading
+                        import threading
+                        response_line = [None]
+                        def _read():
+                            try:
+                                response_line[0] = proc.stdout.readline()
+                            except Exception:
+                                pass
+                        t = threading.Thread(target=_read, daemon=True)
+                        t.start()
+                        t.join(timeout=5)
+                        resp_text = response_line[0]
+                    else:
+                        ready, _, _ = select.select([proc.stdout], [], [], 5)
+                        resp_text = proc.stdout.readline() if ready else None
+                    
+                    if resp_text:
+                        resp = json.loads(resp_text.strip())
+                        server_info = resp.get("result", {}).get("serverInfo", {})
+                        self.servers[name] = {
+                            "config": config,
+                            "status": "ready",
+                            "process": proc,
+                            "server_info": server_info,
+                            "tools": [],
+                        }
+                        console.print(f"  ✓ {name}: {config.get('description', 'N/A')} [dim](pid={proc.pid})[/dim]")
+                    else:
+                        # Server didn't respond to initialize — might not support MCP
+                        proc.terminate()
+                        self.servers[name] = {
+                            "config": config,
+                            "status": "ready",  # mark as ready anyway — mock tools
+                            "process": None,
+                            "tools": [],
+                        }
+                        console.print(f"  ⚠ {name}: no MCP response (mock mode)")
+                        
+                except Exception as init_err:
+                    proc.terminate()
+                    self.servers[name] = {
+                        "config": config,
+                        "status": "ready",
+                        "process": None,
+                        "tools": [],
+                    }
+                    console.print(f"  ⚠ {name}: init failed ({init_err}), running in mock mode")
+                    
+            except Exception as e:
                 self.servers[name] = {
                     "config": config,
-                    "status": "ready",
-                    "tools": []  # Will be populated from server
+                    "status": "error",
+                    "error": str(e),
+                    "process": None,
+                    "tools": [],
                 }
-                console.print(f"  ✓ {name}: {config.get('description', 'N/A')}")
-            except Exception as e:
                 console.print(f"  ✗ {name}: {e}")
         
+        # Discover tools from active servers
+        await self._discover_all_tools()
         console.print()
+    
+    async def _discover_all_tools(self):
+        """Discover tools from all active MCP servers via JSON-RPC."""
+        for server_name, server_info in self.servers.items():
+            proc = server_info.get("process")
+            if proc and proc.poll() is None:
+                try:
+                    # Send tools/list request
+                    request = json.dumps({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/list",
+                        "params": {},
+                    })
+                    proc.stdin.write(request + "\n")
+                    proc.stdin.flush()
+                    
+                    import threading
+                    response_line = [None]
+                    def _read():
+                        try:
+                            response_line[0] = proc.stdout.readline()
+                        except Exception:
+                            pass
+                    t = threading.Thread(target=_read, daemon=True)
+                    t.start()
+                    t.join(timeout=5)
+                    
+                    if response_line[0]:
+                        resp = json.loads(response_line[0].strip())
+                        tools = resp.get("result", {}).get("tools", [])
+                        for tool in tools:
+                            tool["server"] = server_name
+                        server_info["tools"] = tools
+                        self.tools.update({t["name"]: t for t in tools})
+                except Exception as e:
+                    pass  # Discovery failed, will use mock tools
     
     async def list_tools(self) -> List[Dict[str, Any]]:
         """List all available tools from MCP servers"""
         all_tools = []
         
         for server_name, server_info in self.servers.items():
-            # TODO: Query actual MCP server for tools
-            # For now, mock some tools
+            # Use discovered tools if available
+            discovered = server_info.get("tools", [])
+            if discovered:
+                all_tools.extend(discovered)
+                continue
+            
+            # Fallback: provide built-in tool definitions based on server type
             if server_name == "filesystem":
                 all_tools.extend([
-                    {"name": "read_file", "server": server_name, "description": "Read file contents"},
-                    {"name": "write_file", "server": server_name, "description": "Write file contents"},
-                    {"name": "list_directory", "server": server_name, "description": "List directory contents"}
+                    {"name": "read_file", "server": server_name, "description": "Read file contents",
+                     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}},
+                    {"name": "write_file", "server": server_name, "description": "Write file contents",
+                     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
+                    {"name": "list_directory", "server": server_name, "description": "List directory contents",
+                     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}},
                 ])
             elif server_name == "web-search":
                 all_tools.extend([
-                    {"name": "web_search", "server": server_name, "description": "Search the web"},
-                    {"name": "fetch_url", "server": server_name, "description": "Fetch URL content"}
+                    {"name": "web_search", "server": server_name, "description": "Search the web",
+                     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}},
+                    {"name": "fetch_url", "server": server_name, "description": "Fetch URL content",
+                     "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}}}},
                 ])
             elif server_name == "git":
                 all_tools.extend([
-                    {"name": "git_status", "server": server_name, "description": "Get git status"},
-                    {"name": "git_commit", "server": server_name, "description": "Create git commit"},
-                    {"name": "github_create_repo", "server": server_name, "description": "Create GitHub repository"}
+                    {"name": "git_status", "server": server_name, "description": "Get git status",
+                     "inputSchema": {"type": "object", "properties": {}}},
+                    {"name": "git_commit", "server": server_name, "description": "Create git commit",
+                     "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}}},
+                    {"name": "github_create_repo", "server": server_name, "description": "Create GitHub repository",
+                     "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}}}},
                 ])
         
         return all_tools
     
     async def execute_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
-        """Execute a tool via MCP server"""
+        """Execute a tool via MCP server using JSON-RPC 2.0"""
         # Find which server has this tool
+        target_server = None
         for server_name, server_info in self.servers.items():
-            # TODO: Check if tool exists in server
-            # TODO: Execute tool via MCP protocol
-            pass
+            server_tools = [t.get("name", "") for t in server_info.get("tools", [])]
+            if tool_name in server_tools:
+                target_server = server_name
+                break
         
-        # Placeholder response
-        return {"status": "success", "result": "Tool executed"}
+        # Also check built-in tool mappings
+        if not target_server:
+            tool_server_map = {
+                "read_file": "filesystem", "write_file": "filesystem", "list_directory": "filesystem",
+                "web_search": "web-search", "fetch_url": "web-search",
+                "git_status": "git", "git_commit": "git", "github_create_repo": "git",
+            }
+            target_server = tool_server_map.get(tool_name)
+        
+        if not target_server or target_server not in self.servers:
+            return {"status": "error", "error": f"Tool '{tool_name}' not found in any server"}
+        
+        server_info = self.servers[target_server]
+        proc = server_info.get("process")
+        
+        if proc and proc.poll() is None:
+            try:
+                # Send JSON-RPC tool call
+                request = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 100,
+                    "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": params},
+                })
+                proc.stdin.write(request + "\n")
+                proc.stdin.flush()
+                
+                import threading
+                response_line = [None]
+                def _read():
+                    try:
+                        response_line[0] = proc.stdout.readline()
+                    except Exception:
+                        pass
+                t = threading.Thread(target=_read, daemon=True)
+                t.start()
+                t.join(timeout=30)
+                
+                if response_line[0]:
+                    resp = json.loads(response_line[0].strip())
+                    if "error" in resp:
+                        return {"status": "error", "error": resp["error"]}
+                    return {"status": "success", "result": resp.get("result", {})}
+                else:
+                    return {"status": "error", "error": "Server timed out"}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+        
+        # Fallback: execute built-in implementation
+        return await self._execute_builtin(tool_name, params)
+    
+    async def _execute_builtin(self, tool_name: str, params: Dict[str, Any]) -> Any:
+        """Built-in fallback implementations for common tools."""
+        import os
+        
+        if tool_name == "read_file":
+            path = params.get("path", "")
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                return {"status": "success", "result": content}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+        
+        elif tool_name == "write_file":
+            path = params.get("path", "")
+            content = params.get("content", "")
+            try:
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return {"status": "success", "result": f"Written {len(content)} bytes to {path}"}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+        
+        elif tool_name == "list_directory":
+            path = params.get("path", ".")
+            try:
+                entries = os.listdir(path)
+                return {"status": "success", "result": entries}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+        
+        elif tool_name == "web_search":
+            query = params.get("query", "")
+            try:
+                from src.utils.web_search import web_search
+                results = web_search(query)
+                return {"status": "success", "result": results}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+        
+        elif tool_name == "git_status":
+            import subprocess
+            try:
+                result = subprocess.run(["git", "status", "--short"], capture_output=True, text=True)
+                return {"status": "success", "result": result.stdout}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+        
+        return {"status": "error", "error": f"No built-in implementation for '{tool_name}'"}
     
     def display_servers(self):
         """Display available MCP servers"""
@@ -504,8 +757,19 @@ class ClaudeCodeCLI:
                 console.print(f"\n[red]❌ Error: {e}[/red]\n")
         
         else:
-            console.print("[dim]General request - routing to appropriate handler...[/dim]\n")
-            # TODO: Route to appropriate handler
+            # Route general requests through sequential thinking → LLM
+            console.print("[dim]Analyzing request...[/dim]\n")
+            try:
+                from src.utils.model_manager import get_fallback_llm
+                llm = get_fallback_llm("balanced")
+                response = llm.invoke(
+                    f"You are a helpful coding assistant. The user said:\n\n{user_input}\n\n"
+                    "Respond concisely and helpfully. If they're asking about code, provide examples."
+                )
+                content = response.content if hasattr(response, "content") else str(response)
+                console.print(Markdown(content))
+            except Exception as e:
+                console.print(f"[yellow]Could not process request: {e}[/yellow]")
     
     async def run(self):
         """Main CLI loop"""

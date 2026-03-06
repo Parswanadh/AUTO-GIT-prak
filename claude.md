@@ -1,8 +1,8 @@
 # 🤖 CLAUDE.MD - Auto-GIT Session Context & System State
 
-**Last Updated**: February 5, 2026  
+**Last Updated**: March 2, 2026  
 **Purpose**: Comprehensive session context for AI agents working on Auto-GIT  
-**Status**: System is 78% complete, actively fixing critical bugs  
+**Status**: System is ~90% complete, pipeline hardened with artifact stripping + silent failure fixes  
 
 ---
 
@@ -101,8 +101,12 @@ src/
 │   └── semantic_cache.py    # Caches LLM responses
 │
 ├── utils/                   # Utilities
-│   ├── model_manager.py     # NEW: Prevents VRAM thrashing
-│   ├── resource_monitor.py  # NEW: Tracks CPU/RAM/VRAM
+│   ├── model_manager.py     # Prevents VRAM thrashing
+│   ├── resource_monitor.py  # Tracks CPU/RAM/VRAM
+│   ├── traceback_parser.py  # NEW S13: Structured error extraction
+│   ├── error_pattern_db.py  # NEW S13: 12 regex auto-fix patterns
+│   ├── docker_executor.py   # NEW S13: Docker sandbox execution
+│   ├── incremental_compiler.py # NEW S13: Per-file validation
 │   ├── code_validator.py    # Validates generated code
 │   └── web_search.py        # DuckDuckGo + SearXNG
 │
@@ -445,36 +449,46 @@ stats = monitor.stats
 
 ### Most Important Files (Work Here Most Often)
 
-1. **`src/langraph_pipeline/nodes.py`** (1,454 lines)
-   - All 9 pipeline nodes
+1. **`src/langraph_pipeline/nodes.py`** (~8,500 lines)
+   - All pipeline nodes (16 nodes)
    - WHERE: Most bugs and TODOs
-   - RECENTLY: Updated to use model manager
-   - NEXT: Fix GGML errors, add monitoring
+   - RECENTLY: Session 13 — integrated traceback parser, error pattern DB, Docker sandbox, incremental compiler
+   - NEXT: Fix pre-existing bugs (unclosed paren line 7336), implement ranks 6-10
 
-2. **`src/langraph_pipeline/workflow_enhanced.py`** (500+ lines)
+2. **`src/langraph_pipeline/workflow_enhanced.py`** (735 lines)
    - Pipeline orchestration
    - Entry point: `run_auto_git_pipeline()`
    - WHERE: Add resource monitoring integration
-   - NEXT: Integrate ResourceMonitor
 
-3. **`src/utils/model_manager.py`** (200 lines)
-   - NEW: Just created (Feb 5)
+3. **`src/utils/traceback_parser.py`** (240 lines)
+   - NEW: Session 13
+   - Parses Python tracebacks into structured ParsedError objects
+   - Provides ±10 line code context around errors
+   - Integrated: fix loop in nodes.py
+
+4. **`src/utils/error_pattern_db.py`** (470 lines)
+   - NEW: Session 13
+   - 12 regex auto-fix patterns (missing_self, imports, encoding, etc.)
+   - Fixes common errors WITHOUT LLM calls
+   - Integrated: fix loop in nodes.py (runs before LLM)
+
+5. **`src/utils/docker_executor.py`** (340 lines)
+   - NEW: Session 13
+   - Docker sandbox with CPU/memory/network limits
+   - Falls back to local subprocess if Docker unavailable
+   - Integrated: code_testing_node in nodes.py
+
+6. **`src/utils/incremental_compiler.py`** (310 lines)
+   - NEW: Session 13
+   - Per-file AST validation during code generation
+   - Tracks exports, detects circular deps, feeds back to next file prompt
+   - Integrated: code_generation_node in nodes.py
+
+7. **`src/utils/model_manager.py`** (200 lines)
    - Prevents VRAM thrashing
    - 4 model profiles (fast/balanced/powerful/reasoning)
-   - STATUS: Needs testing
 
-4. **`src/utils/resource_monitor.py`** (200 lines)
-   - NEW: Just created (Feb 5)
-   - Tracks CPU/RAM/VRAM
-   - Background monitoring thread
-   - STATUS: Needs integration
-
-5. **`src/cli/claude_code_cli.py`** (700 lines)
-   - Claude Code style CLI
-   - WHERE: 6 TODOs for MCP integration
-   - STATUS: Partially implemented
-
-6. **`config.yaml`** (200 lines)
+8. **`config.yaml`** (426 lines)
    - Main configuration
    - Model settings, MCP servers, thresholds
    - MODIFY: When adding new features
@@ -488,10 +502,11 @@ stats = monitor.stats
 ### Documentation Files (Keep These)
 
 1. **`claude.md`** - THIS FILE (session context)
-2. **`BUILD_STATUS_TODO.md`** - Detailed TODO list
-3. **`COMPLETE_SYSTEM_DOCUMENTATION.md`** - System docs
-4. **`COMPETITIVE_ANALYSIS_PATENT_STRATEGY.md`** - Competitive analysis
-5. **`README.md`** - User-facing docs
+2. **`PIPELINE_IMPROVEMENT_PLAN.md`** - 55 free MCPs + 10 ranked improvements
+3. **`BUILD_STATUS_TODO.md`** - Detailed TODO list
+4. **`COMPLETE_SYSTEM_DOCUMENTATION.md`** - System docs
+5. **`PROGRESS.md`** - Detailed session history
+6. **`README.md`** - User-facing docs
 
 ---
 
@@ -708,289 +723,42 @@ pip list | grep ollama
 
 ## 📝 SESSION UPDATE LOG
 
-### February 5, 2026 - Session 1
-- ✅ Created `src/utils/model_manager.py` - Prevents VRAM thrashing
-- ✅ Created `src/utils/resource_monitor.py` - Tracks CPU/RAM/VRAM
-- ✅ Updated all nodes in `nodes.py` to use model manager
-- ✅ Fixed consensus_check_node IndexError
-- ✅ Fixed problem_extraction_node NoneType errors
-- ✅ Created `test_with_monitoring.py` - Test with resource monitoring
-- ✅ Created `BUILD_STATUS_TODO.md` - Comprehensive TODO list
-- ✅ Created `COMPETITIVE_ANALYSIS_PATENT_STRATEGY.md` - 15K word analysis
-- ✅ Created `claude.md` - THIS FILE (session context)
-
-### February 5, 2026 - Session 2 (Current)
-- ✅ Installed validation tools: ruff, mypy, bandit, gpustat, pynvml
-- ✅ Created `src/utils/enhanced_validator.py` - Type checking, security, linting
-- ✅ Tested enhanced validator - ALL TOOLS WORKING
-  - Syntax: AST parsing ✅
-  - Type checking: mypy ✅
-  - Security: bandit ✅ (scored 85/100 on test)
-  - Linting: ruff ✅ (scored 96/100 on test)
-  - Overall quality: 95/100
-- ✅ Moved unnecessary docs to unwanted folder
-- ⏳ NEXT: Integrate enhanced validation into pipeline nodes
-
-### February 1, 2026
-- ❌ Attempted end-to-end test: URL shortener API - FAILED
-- 🐛 Discovered multiple critical bugs (VRAM, IndexError, NoneType, GGML)
-- 🐛 VS Code crashes due to resource issues
-- 📝 Started bug fixing process
-
-### January 31, 2026
-- ✅ Completed system transformation (10 tasks)
-- ✅ Codebase cleanup (291 files moved to unwanted/)
-- ✅ Created Claude Code CLI
-- ✅ Integrated MCP architecture (not implemented)
-- ✅ Added sequential thinking
-- ✅ System diagnostics passing (4/4 tests)
-
-### February 5, 2026 - Session 3: Enhanced Validation + Critical Bug Fixes
-- ✅ Created `enhanced_validator.py` (450 lines, 5-stage validation)
-- ✅ Installed validation tools: mypy 1.19.1, ruff 0.15.0, bandit 1.9.3
-- ✅ Tested validator: 95/100 quality (85/100 security, 96/100 lint)
-- ✅ Integrated into `code_testing_node` (nodes.py line 997)
-- ✅ Added quality scoring with 50/100 minimum threshold
-- ✅ Enhanced logging: now shows quality, security, lint scores
-- ✅ **TESTED AND VERIFIED**: code_testing_node working perfectly!
-  - Good code: 100/100 quality (✅ all checks passed)
-  - Unsafe code: 87/100 quality (✅ security issues detected: 50/100)
-  - Quality difference: 13 points (properly differentiates)
-  - Threshold enforcement: ✅ Working
-
-**CRITICAL BUG FIXES (OOM & Infinite Loop)**:
-- ✅ **Fixed OOM**: Added garbage collection to model_manager (import gc, gc.collect())
-- ✅ **Fixed infinite loop**: code_testing → code_fixing loop prevention
-  - Added checks for no files/no errors cases
-  - Reduced max_fix_attempts from 6 to 3 (prevent OOM)
-  - Added tests_passed=True/False flags to break loops
-  - Added stage checks (testing_skipped, no_errors_to_fix, fixing_failed)
-- ✅ **Fixed recursion limit**: Added recursion_limit=50 to workflow.compile()
-- ✅ **Fixed None errors**: Added comprehensive null checks in problem_extraction
-  - Check isinstance(papers, list) before processing
-  - Check isinstance(implementations, list) before processing
-- ✅ **Added memory cleanup**: gc.collect() after code_generation and on errors
-
-**Root Causes Identified**:
-1. **OOM**: Models not being garbage collected → Added explicit del + gc.collect()
-2. **Infinite Loop**: code_testing returned "no_errors_to_fix" but workflow kept looping → Fixed routing logic
-3. **Recursion**: LangGraph default limit (25) too low → Increased to 50
-4. **None Errors**: research_context.get() returned None, then .get() called on None → Added isinstance checks
-
-- 📊 Impact: Expected first-time correctness 45% → 85%
-- ⏭️ Next: Test full pipeline with fixes applied
-
-### February 23, 2026 - Session 4: Runtime Correctness + Dynamic Model Timeouts
-
-**Quality Audit (starting point)**:
-- Ran full pipeline on SNN hardware accelerator idea
-- Output analysis: **2.5/10** — files don't run at all despite 99.2/100 validator score
-  - `three_tier_spike_memory_hierarchy.py` = 0 bytes (empty file)
-  - Circular imports between files
-  - Wrong class names called (`EventISA` vs `EventDrivenISA`)
-  - Constants imported that don't exist
-  - Root cause: validator only checks syntax/lint, blind to runtime failures
-
-**Root causes identified**:
-1. No cross-file API agreement before generation → wrong method names, missing classes
-2. Validator never actually *runs* the code → catches 0 runtime errors
-3. `deepseek-r1-0528:free` timing out immediately → `CALL_TIMEOUT_S=45s` << 101s real avg latency
-
-**Option 1 — Interface Contract Phase** (`src/langraph_pipeline/nodes.py`):
-- ✅ After file plan, one LLM call generates `CONTRACTS.json`: class names, constructors, method signatures, module constants
-- ✅ Contract injected into every `_file_prompt()` as mandatory "INTERFACE CONTRACT — you MUST implement these EXACT signatures"
-- Goal: All files agree on API before any code is written
-
-**Option 2 — Run main.py in Sandbox** (`src/utils/code_executor.py`):
-- ✅ `test_imports()` now discovers all `.py` files dynamically (was hardcoded to 4 filenames)
-  - Sorts so `main.py` is always tested last (after its dependencies)
-- ✅ New `run_entry_point()` method: runs `python main.py` with 15s timeout in the venv
-  - Exit 0 → pass
-  - Exit non-0 → captures `stderr` (`AttributeError`, `TypeError`, circular imports) → feeds to fix loop
-  - `TimeoutExpired` → server/infinite loop → counts as PASS
-- ✅ Integrated as Step 4.5 in `run_full_test_suite()` (between imports check and basic tests)
-
-**Option 6 — LLM Self-Review Pass** (`src/langraph_pipeline/nodes.py`):
-- ✅ After parallel generation, all `.py` files sent to fast LLM for cross-file consistency audit
-- Detects: wrong method called, name not defined, wrong constructor args, circular imports
-- JSON response: `{"issues": [{"file": "x.py", "problem": "...", "fix_hint": "..."}]}`
-- Auto-patches each affected file before any tests run (pre-test fix pass)
-
-**Per-Model Dynamic Timeout** (`src/utils/model_manager.py`):
-- ✅ Added `MODEL_TIMEOUT_OVERRIDES: Dict[str, int]` module-level dict (line ~52)
-  - Based on real OpenRouter performance dashboard measurements (Feb 2026)
-  - `deepseek-r1` → **300s** (measured: 101s avg, 257s E2E on OpenRouter)
-  - `qwq` → 240s (QwQ-32B reasoning model)
-  - `-thinking` → 180s (any *-thinking variant)
-  - `qwen3-235b` → 90s (235B MoE, cold start overhead)
-  - `qwen3-coder` → 90s (480B MoE)
-  - `flash` / `instant` → 25-30s (by design fast)
-  - default → 45s (`CALL_TIMEOUT_S` unchanged as fallback)
-- ✅ Added `_get_model_timeout(model_name)` method to `ModelManager`
-  - Substring matching, longest pattern wins
-- ✅ `FallbackLLM.ainvoke()` now uses `_get_model_timeout()` instead of `CALL_TIMEOUT_S`
-- ✅ Timeout log message now shows `limit=Xs` so you can see which timeout was applied
-- ✅ Compile-verified: `py_compile` passed cleanly
-
-**Real latency data (source: OpenRouter performance dashboard, Feb 2026)**:
-| Model | Avg Latency | E2E Latency | Throughput | Override |
-|---|---|---|---|---|
-| deepseek/deepseek-r1-0528:free | 101.48s | 257.12s | 5-6 tok/s | 300s |
-| deepseek/deepseek-r1-0528 (paid) | 136.6s | — | 5 tok/s | 300s |
-| qwen/qwen3-235b-a22b:free | ~60s | ~90s | 10+ tok/s | 90s |
-
-**Session impact**:
-- Pipeline no longer kills reasoning models before they return a single token
-- Cross-file API mismatches caught before tests run (Option 1 + Option 6)
-- Runtime crashes now detected and fed to fix loop (Option 2)
-- First-time correctness target: 45% → 85%
-
-### February 24, 2026 - Session 6: Deep Code Review Agent (Node 7.5)
-
-**New node: `code_review_agent_node`** (`src/langraph_pipeline/nodes.py`)
-- ✅ Added `code_review_agent_node` as Node 7.5 between code_generation and code_testing
-- ✅ Wired into `workflow_enhanced.py`: `code_generation → code_review_agent → code_testing`
-- ✅ Imported in workflow_enhanced.py node import block
-- ✅ Compile-verified: both files pass `py_compile`
-
-**What it does (vs old Option 6)**:
-
-| | Option 6 (embedded, still present) | Node 7.5 code_review_agent |
-|---|---|---|
-| When | End of code_generation | Dedicated node after generation |
-| LLM | fast | powerful (analysis) + balanced (fixes) |
-| Context | None — just the files | idea + selected_problem + solution architecture |
-| Checks | 5 cross-file API bugs only | 8 bug types including truncation, missing `__main__`, dead logic, silent main, stubs |
-| Detects | Wrong method names, missing exports, circular imports | All of above PLUS truncated files, fire()-after-step() logic bugs, main.py that exits 0 silently |
-| Iterations | 1 | Up to 2 (review → fix → re-review) |
-
-**Bug types checked**:
-1. `TRUNCATED` — file ends mid-function body
-2. `MISSING_ENTRY_POINT` — main.py has no `if __name__ == '__main__':` block
-3. `SILENT_MAIN` — entry point exists but produces zero output
-4. `DEAD_LOGIC` — checking state after a mutating call (fire() after step())
-5. `STUB_BODY` — function is just `pass` / `...` / `NotImplementedError`
-6. `WRONG_CALL` — method called that doesn't exist in the class
-7. `MISSING_EXPORT` — name imported from file where it's not defined
-8. `CIRCULAR_IMPORT` — A imports B, B imports A
-
-**New pipeline flow**:
-```
-code_generation → code_review_agent (Node 7.5) → code_testing → code_fixing loop
-```
-
-**Root cause of this session's bug** (LO-SN project):
-- main.py was 97 lines, truncated mid-function, no `__main__` guard → silent exit 0
-- fire() called after step() → step() already reset v=0, so fire() always False → 0 spikes recorded
-- Old Option 6 missed both because it only checked 5 structural patterns, had no build context
-
-### February 23, 2026 - Session 5: Dead Model Cleanup + Empty File Fixes
-
-**Dead OpenRouter endpoints removed** (`src/utils/model_manager.py`):
-- ✅ Removed `openai/gpt-oss-120b:free` from all 4 profiles (404 — endpoint deleted)
-- ✅ Removed `qwen/qwen3-235b-a22b:free` from all 4 profiles (404 — endpoint deleted)
-- ✅ Also removed `qwen/qwen3-32b:free` (404 during this session's run)
-- ✅ Added `compound-beta: 90s` to `MODEL_TIMEOUT_OVERRIDES` (web search needs more time)
-- ✅ Removed dead model patterns from `MODEL_TIMEOUT_OVERRIDES` dict
-
-**SearXNG / DDGS fixes** (`src/utils/web_search.py`, `src/research/searxng_client.py`):
-- ✅ `duckduckgo_search` renamed to `ddgs` upstream — now tries `ddgs` first, falls back to old name
-- ✅ Installed `ddgs` package
-- ✅ SearXNG now does a real `is_available()` probe at startup instead of blindly adding itself to the engine list — no more connection-refused log spam
-- ✅ `searxng_client.py` breaks immediately on `WinError 10061` (connection refused) instead of retrying 3× wasting time
-
-**Empty file fixes** (`src/langraph_pipeline/nodes.py`):
-- Root cause: `main.py` was 0 bytes despite 3 retry attempts
-- ✅ **Fix A — Regen comparison bug**: Changed `len(real_after) > len(real_lines)` → `len(real_after) > 0`
-  - When both were 0, the comparison was always False → regen result never applied
-- ✅ **Fix B — Skeleton fallback**: When all 3 retries return empty, write a minimal runnable skeleton with `raise NotImplementedError` instead of an empty file
-  - Skeleton is parseable; the fix loop can patch it; empty file was unrecoverable
-- ✅ **Fix C — Post-gather audit**: After `asyncio.gather`, scan all `.py` files for `len < 50` bytes and retry them serially before proceeding
-  - Catches anything the per-file logic missed (e.g., exceptions swallowed by `return_exceptions=True`)
-- Compile verified: `py_compile` passed
-
-### February 25, 2026 - Session 7: Pipeline Run #9 + Critical Bug Fixes
-
-**Pipeline Run #9 Results** (Sentiment Analyzer idea):
-- Self-eval: **8.0/10 APPROVED** — significant improvement from 3.0/10 (Run #8)
-- Average code quality: **90/100** (data.py 99, model.py 99, train.py 88, main.py 79, utils.py 85)
-- Total tokens: 220K across 40 LLM calls
-- Code Review Agent: Found 3 critical + 6 warnings → fixed → iteration 2 = 0 issues
-- Strategy Reasoner correctly identified `missing_dep` (numpy not in requirements.txt)
-- Shadow file detection working: auto-deleted numpy.py
-- Pipeline total time: ~225min (BUT ~200min was network outage, productive time ~20min)
-- **Remaining issue**: train.py used `model = nn.Module()` placeholder instead of real model class
-
-**Dead models removed** (`src/utils/model_manager.py`):
-- ✅ Removed `deepseek/deepseek-r1-0528:free` from reasoning profile (404)
-- ✅ Replaced `openai/gpt-oss-20b:free` → `stepfun/step-3.5-flash:free` (fast)
-- ✅ Replaced `qwen/qwen3-32b:free` → `arcee-ai/trinity-mini:free` (balanced, powerful)
-- ✅ Replaced `google/gemini-2.5-flash-preview` → `google/gemini-2.5-flash` (powerful)
-
-**Cross-file import validator fix** (`src/langraph_pipeline/nodes.py`):
-- Root cause: Line 2773 `if _src_mod not in _module_stems: continue` SKIPPED imports to non-existent modules
-- When `from surprise_metric import X` but surprise_metric.py doesn't exist → validator ignored it
-- Fix: Added Case A (module exists → check exports) and Case B (module doesn't exist and not stdlib → all imports treated as missing)
-- Applied in BOTH locations: code_generation_node AND code_fixing_node validators
-- Added `_STDLIB_AND_THIRDPARTY` set (40+ known packages) to prevent false positives
-
-**Loop reduction** (`nodes.py`, `state.py`):
-- MAX_SELF_EVAL: 3 → **1** (one self-eval, no regen loop)
-- Self-eval threshold: `< 6` → **`< 4`** (only re-loop on very low scores)
-- max_fix_attempts: 3 → **2** (was spending too long in fix loops)
-- Net worst-case: 3×3=9 iterations → 2×1=2 iterations
-
-**PLACEHOLDER_INIT detection** (NEW — `nodes.py`):
-- ✅ Added PLACEHOLDER_INIT as bug type #12 in code_review_agent prompt
-- ✅ Added static AST regex check in code_testing_node: detects `model = nn.Module()` pattern
-- ✅ Added rules 9-10 in code_generation prompt: "NEVER assign bare nn.Module()"
-- Root cause: LLMs generate placeholder inits with real init commented out
-
-**Shadow file prevention in git_publishing** (`nodes.py`):
-- ✅ Added `_SHADOW_SAVE` filter: numpy, torch, scipy, etc. excluded from file save
-- Previously: code_fixing deleted numpy.py but git_publishing re-saved it from state
-
-**Accumulated state fix** (`workflow_enhanced.py`):
-- Bug: `run_auto_git_pipeline()` returned only the last node's partial output
-- Fix: Added `accumulated_state = {}` that merges all node outputs
-- Now callers (run_pipeline.py) get the full state with `generated_code`, `final_solution`, etc.
-
-**Clean pipeline runner** (`run_pipeline.py` — NEW):
-- Created clean runner with argparse, banner, validation
-- `_validate_output()`: AST syntax check, cross-file import validation, `python main.py` execution test
-- Reads files from `output_path` if state doesn't have them (fallback)
-- Supports `--fresh` flag and custom idea as positional argument
+> **Full session history moved to [`PROGRESS.md`](PROGRESS.md)** to keep this file focused on architecture & current state.
+> 
+> Latest session: **Session 13 (Mar 3, 2026)** — Free MCP catalog (55 servers) + implemented top 5 pipeline techniques: traceback parser, error pattern DB, Docker sandbox, incremental compiler. See `PIPELINE_IMPROVEMENT_PLAN.md`.
 
 ---
 
 ## 🎬 NEXT STEPS (What to Do Now)
 
 ### Immediate (Next Session)
-1. **Run Pipeline #10** with all fixes applied (PLACEHOLDER_INIT, shadow filter, accumulated state)
-2. **Measure improvement**: Target 7+/10 self-eval, code that actually runs
-3. **Watch for**: nn.Module() placeholders, shadow numpy.py, cross-file import mismatches
+1. **Fix pre-existing nodes.py bugs**: Unclosed paren line 7336, duplicate timeout/retry code
+2. **End-to-End Test**: Run pipeline with all Session 11-13 improvements on a fresh project
+3. **Measure Impact**: Target 8.5+/10 self-eval, fewer fix-loop iterations, faster error recovery
 
-### Next Priority
-1. **Test generation**: Use LLM to write pytest tests for each generated function
-2. **Circular import prevention** in interface contracts
-3. **Integrate resource monitoring** into workflow_enhanced.py
-4. **Performance profiling** — time each node
+### Next Priority (Ranks 6-10 from PIPELINE_IMPROVEMENT_PLAN.md)
+1. **Rank 6**: Speculative Diff-Based Editing (30-40% faster fixes)
+2. **Rank 7**: Repo Map / Code Graph (cross-file consistency)
+3. **Rank 8**: TDD Loop (85%+ correctness)
+4. **Rank 9**: Multi-Model Ensemble (-10% error rate)
+5. **Rank 10**: Semgrep SAST (security scanning)
 
-### Next 2 Weeks
-1. Complete MCP integration (6 TODOs in `src/cli/claude_code_cli.py`)
-2. Multi-language support (Rust, Go, TypeScript)
-3. Scale testing (100+ ideas)
+### MCP Integration (from PIPELINE_IMPROVEMENT_PLAN.md)
+1. **Tier 1**: E2B Code Sandbox, Daytona Sandbox (Docker-based)
+2. **Tier 2**: Semgrep, pip-audit (security scanning)
+3. **Tier 3**: Brave Search, ArXiv, Exa (research enhancement)
+4. **Tier 4-8**: See PIPELINE_IMPROVEMENT_PLAN.md for full 55-server catalog
 
 ---
 
 **Remember**: 
-- System is ~84% complete (bumped: PLACEHOLDER_INIT detection, shadow filter, accumulated state fix)
-- Focus on CORRECTNESS now (code that actually runs)
-- Pipeline Run #9 scored **8.0/10** self-eval with **90/100 avg quality** — significant improvement
-- Main remaining issue: LLMs still generate placeholder inits (now detected statically)
+- System is ~90% complete
+- Pipeline has **16 nodes**: requirements_extraction → research → ... → git_publishing
+- Focus on CORRECTNESS (code that runs AND produces correct output)
+- **SOTA integrated**: LLM-as-Judge, RAD, Reflexion, auto test gen, CoT requirements, error memory
+- **Session 11**: Artifact stripper, circular import detector, SQL schema checker, 8 silent failure fixes, retry logic, fail-safe defaults
+- **Session 12**: Web research + MCP strategy → `PIPELINE_IMPROVEMENT_PLAN.md`
+- **Session 13**: Implemented top 5 improvements — traceback parser, error pattern DB (12 patterns), Docker sandbox, incremental compiler. All integrated into nodes.py. 55 free MCPs cataloged.
+- See [`PROGRESS.md`](PROGRESS.md) for detailed session history
 
-**Good Luck!** 🚀
-
----
-
-*This file should be updated after every major change or bug fix.*
+*Update PROGRESS.md (not this file) after each session.*

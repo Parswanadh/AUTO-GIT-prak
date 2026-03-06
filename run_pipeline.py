@@ -158,7 +158,8 @@ def _validate_output(files: dict, output_dir: str):
         main_file = next(iter(py_files), None)
 
     if main_file and output_dir:
-        main_path = os.path.join(output_dir, os.path.basename(main_file))
+        abs_output = os.path.abspath(output_dir)
+        main_path = os.path.join(abs_output, os.path.basename(main_file))
         if os.path.exists(main_path):
             print(f"\n  🚀 Testing: python {main_file}")
             import subprocess
@@ -166,7 +167,7 @@ def _validate_output(files: dict, output_dir: str):
                 result = subprocess.run(
                     [sys.executable, main_path],
                     capture_output=True, text=True, timeout=30,
-                    cwd=output_dir
+                    cwd=abs_output
                 )
                 if result.returncode == 0:
                     output = result.stdout.strip()
@@ -271,8 +272,11 @@ async def main(idea: str, resume: bool):
         print("\n⚠️  No files generated.")
         return
 
-    # Save files (use pipeline's output path if available)
-    out = output_path if output_path and os.path.isdir(output_path) else f"output/{slug}/generated"
+    # Save files (use pipeline's output path if available, avoid doubling)
+    if output_path and os.path.isdir(output_path):
+        out = output_path
+    else:
+        out = f"output/{slug}/generated"
     os.makedirs(out, exist_ok=True)
     for fname, code in files.items():
         path = os.path.join(out, fname)
@@ -291,7 +295,25 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Auto-GIT Pipeline Runner")
     parser.add_argument("idea", nargs="?", default=DEFAULT_IDEA, help="Your idea (default: Baby Dragon)")
     parser.add_argument("--fresh", action="store_true", help="Force fresh run, ignore checkpoint")
+    parser.add_argument("--rerun", metavar="DIR", help="Re-test & fix existing output directory (skip research/debate/generation)")
+    parser.add_argument("--change", action="append", default=[], help="User-directed change for --rerun (repeatable)")
+    parser.add_argument("--eval-only", action="store_true", help="With --rerun: evaluate quality only, no fixing")
+    parser.add_argument("--max-fixes", type=int, default=3, help="With --rerun: max fix attempts (default: 3)")
     args = parser.parse_args()
 
     _progress("run_pipeline.py started")
-    asyncio.run(main(args.idea, resume=not args.fresh))
+
+    if args.rerun:
+        # Delegate to rerun_fix.py logic
+        _progress(f"RERUN MODE: {args.rerun}")
+        rerun_args = [sys.executable, os.path.join(os.path.dirname(__file__), "rerun_fix.py"), args.rerun]
+        if args.eval_only:
+            rerun_args.append("--eval-only")
+        for change in args.change:
+            rerun_args.extend(["--change", change])
+        rerun_args.extend(["--max-fixes", str(args.max_fixes)])
+        import subprocess
+        result = subprocess.run(rerun_args)
+        sys.exit(result.returncode)
+    else:
+        asyncio.run(main(args.idea, resume=not args.fresh))

@@ -1,0 +1,585 @@
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-orbitron: 'Orbitron', sans-serif;
+  --font-rajdhani: 'Rajdhani', sans-serif;
+  --font-jetbrains-mono: 'JetBrains Mono', monospace;
+  
+  --color-background: #030712;
+  --color-primary: #00D4FF;
+  --color-secondary: #7C3AED;
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+  --color-text: #F8FAFC;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-text);
+  font-family: var(--font-rajdhani);
+  overflow-x: hidden;
+}
+
+/* Ensure all content is centered */
+section {
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+/* Ensure all grids are centered */
+.grid {
+  justify-content: center;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 212, 255, 0.05);
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--color-primary), var(--color-secondary));
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, var(--color-secondary), var(--color-primary));
+}
+
+/* REMOVED - Particles were too big and ugly */
+
+@keyframes particleFloat {
+  0% {
+    background-position: 0% 0%, 100% 100%, 50% 50%, 80% 10%, 10% 80%, 90% 40%, 40% 20%;
+    opacity: 0.6;
+  }
+  25% {
+    background-position: 50% 20%, 80% 80%, 20% 30%, 90% 50%, 30% 90%, 70% 20%, 60% 70%;
+    opacity: 0.8;
+  }
+  50% {
+    background-position: 100% 100%, 0% 0%, 80% 80%, 20% 90%, 50% 50%, 40% 60%, 80% 30%;
+    opacity: 1;
+  }
+  75% {
+    background-position: 50% 50%, 70% 30%, 30% 70%, 60% 40%, 80% 20%, 20% 80%, 90% 90%;
+    opacity: 0.8;
+  }
+  100% {
+    background-position: 0% 0%, 100% 100%, 50% 50%, 80% 10%, 10% 80%, 90% 40%, 40% 20%;
+    opacity: 0.6;
+  }
+}
+
+/* Grid background overlay - enhanced - MUCH BOLDER */
+.grid-background {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(0, 212, 255, 0.15) 1.5px, transparent 1.5px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.15) 1.5px, transparent 1.5px);
+  background-size: 50px 50px;
+  mask-image: radial-gradient(ellipse 80% 50% at 50% 50%, black 40%, transparent 100%);
+  animation: gridPulse 8s ease-in-out infinite;
+}
+
+@keyframes gridPulse {
+  0%, 100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Floating orbs for visual interest - SUBTLE */
+.floating-orb {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  z-index: 0;
+  animation: floatOrb 20s ease-in-out infinite;
+}
+
+.orb-1 {
+  width: 700px;
+  height: 700px;
+  background: radial-gradient(circle, rgba(0, 212, 255, 0.12) 0%, transparent 70%);
+  top: 5%;
+  left: 5%;
+  animation-delay: 0s;
+}
+
+.orb-2 {
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(124, 58, 237, 0.1) 0%, transparent 70%);
+  top: 50%;
+  right: 5%;
+  animation-delay: -7s;
+}
+
+.orb-3 {
+  width: 650px;
+  height: 650px;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.08) 0%, transparent 70%);
+  bottom: 10%;
+  left: 25%;
+  animation-delay: -14s;
+}
+
+.orb-4 {
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(245, 158, 11, 0.06) 0%, transparent 70%);
+  top: 40%;
+  left: 50%;
+  transform: translateX(-50%);
+  animation-delay: -3s;
+  animation: floatOrb 25s ease-in-out infinite;
+}
+
+@keyframes floatOrb {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+  }
+  25% {
+    transform: translate(30px, -30px) scale(1.1);
+  }
+  50% {
+    transform: translate(-20px, 20px) scale(0.9);
+  }
+  75% {
+    transform: translate(20px, 30px) scale(1.05);
+  }
+}
+
+/* Scanline effect for sci-fi feel - SUBTLE */
+.scanline-effect {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+  background: linear-gradient(
+    to bottom,
+    transparent 50%,
+    rgba(0, 212, 255, 0.02) 50%
+  );
+  background-size: 100% 4px;
+  animation: scanline 10s linear infinite;
+}
+
+/* Starfield background for extra depth - SUBTLE */
+.starfield {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(2px 2px at 5% 10%, rgba(255, 255, 255, 0.6) 0%, transparent 70%),
+    radial-gradient(2px 2px at 15% 25%, rgba(255, 255, 255, 0.7) 0%, transparent 70%),
+    radial-gradient(3px 3px at 25% 5%, rgba(0, 212, 255, 0.6) 0%, transparent 70%),
+    radial-gradient(2px 2px at 35% 40%, rgba(255, 255, 255, 0.65) 0%, transparent 70%),
+    radial-gradient(3px 3px at 45% 15%, rgba(124, 58, 237, 0.6) 0%, transparent 70%),
+    radial-gradient(2px 2px at 55% 50%, rgba(255, 255, 255, 0.7) 0%, transparent 70%),
+    radial-gradient(3px 3px at 65% 30%, rgba(16, 185, 129, 0.6) 0%, transparent 70%),
+    radial-gradient(2px 2px at 75% 60%, rgba(255, 255, 255, 0.65) 0%, transparent 70%),
+    radial-gradient(3px 3px at 85% 20%, rgba(0, 212, 255, 0.6) 0%, transparent 70%),
+    radial-gradient(2px 2px at 95% 45%, rgba(255, 255, 255, 0.7) 0%, transparent 70%),
+    radial-gradient(2px 2px at 10% 70%, rgba(0, 212, 255, 0.5) 0%, transparent 70%),
+    radial-gradient(2px 2px at 30% 85%, rgba(124, 58, 237, 0.5) 0%, transparent 70%),
+    radial-gradient(3px 3px at 50% 75%, rgba(16, 185, 129, 0.5) 0%, transparent 70%),
+    radial-gradient(2px 2px at 70% 90%, rgba(0, 212, 255, 0.6) 0%, transparent 70%),
+    radial-gradient(2px 2px at 90% 80%, rgba(124, 58, 237, 0.5) 0%, transparent 70%),
+    radial-gradient(3px 3px at 20% 50%, rgba(0, 212, 255, 0.5) 0%, transparent 70%),
+    radial-gradient(2px 2px at 80% 50%, rgba(124, 58, 237, 0.6) 0%, transparent 70%),
+    radial-gradient(2px 2px at 40% 90%, rgba(16, 185, 129, 0.5) 0%, transparent 70%),
+    radial-gradient(2px 2px at 60% 10%, rgba(245, 158, 11, 0.5) 0%, transparent 70%);
+  background-size: 200% 200%;
+  animation: starfield 40s ease-in-out infinite;
+}
+
+@keyframes starfield {
+  0%, 100% {
+    background-position: 0% 0%, 20% 10%, 40% 20%, 60% 30%, 80% 40%;
+    opacity: 0.5;
+  }
+  50% {
+    background-position: 100% 100%, 80% 90%, 60% 80%, 40% 70%, 20% 60%;
+    opacity: 0.7;
+  }
+}
+
+@keyframes scanline {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(4px);
+  }
+}
+
+/* Glow pulse for important elements */
+@keyframes glowPulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.3), 0 0 40px rgba(124, 58, 237, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(0, 212, 255, 0.5), 0 0 60px rgba(124, 58, 237, 0.3);
+  }
+}
+
+.glow-effect {
+  animation: glowPulse 3s ease-in-out infinite;
+}
+
+/* Text shimmer effect */
+@keyframes textShimmer {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+.text-shimmer {
+  background: linear-gradient(
+    90deg,
+    #00D4FF 0%,
+    #7C3AED 25%,
+    #F8FAFC 50%,
+    #7C3AED 75%,
+    #00D4FF 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: textShimmer 4s linear infinite;
+}
+
+/* Floating animation */
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* ========================================
+   SUBTLE ENHANCEMENT ANIMATIONS
+   ======================================== */
+
+/* Subtle gradient border animation */
+@keyframes gradientBorder {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.gradient-border {
+  position: relative;
+  background: linear-gradient(90deg, #00D4FF, #7C3AED, #10B981, #00D4FF);
+  background-size: 300% 300%;
+  animation: gradientBorder 8s ease infinite;
+}
+
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  background: var(--color-background);
+  border-radius: inherit;
+  z-index: 1;
+}
+
+.gradient-border > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* Subtle hover lift effect */
+.hover-lift {
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.hover-lift:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px rgba(0, 212, 255, 0.15);
+}
+
+/* Subtle glow on hover */
+.hover-glow {
+  transition: box-shadow 0.3s ease;
+}
+
+.hover-glow:hover {
+  box-shadow: 0 0 20px rgba(0, 212, 255, 0.3), 0 0 40px rgba(124, 58, 237, 0.2);
+}
+
+/* Gentle pulse for highlights */
+@keyframes gentlePulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.gentle-pulse {
+  animation: gentlePulse 2s ease-in-out infinite;
+}
+
+/* Smooth fade-in on scroll */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in-up {
+  animation: fadeInUp 0.6s ease-out forwards;
+}
+
+/* Stagger children animations */
+.stagger-children > *:nth-child(1) { animation-delay: 0s; }
+.stagger-children > *:nth-child(2) { animation-delay: 0.1s; }
+.stagger-children > *:nth-child(3) { animation-delay: 0.2s; }
+.stagger-children > *:nth-child(4) { animation-delay: 0.3s; }
+.stagger-children > *:nth-child(5) { animation-delay: 0.4s; }
+.stagger-children > *:nth-child(6) { animation-delay: 0.5s; }
+
+/* Magnetic button effect - subtle scale on hover */
+.magnetic-button {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.magnetic-button:hover {
+  transform: scale(1.05);
+}
+
+.magnetic-button:active {
+  transform: scale(0.98);
+}
+
+/* Card reveal animation */
+@keyframes cardReveal {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.card-reveal {
+  animation: cardReveal 0.4s ease-out forwards;
+}
+
+/* Subtle shine effect */
+@keyframes shine {
+  from {
+    left: -100%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+.shine-effect {
+  position: relative;
+  overflow: hidden;
+}
+
+.shine-effect::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.1),
+    transparent
+  );
+  animation: shine 3s infinite;
+}
+
+/* Smooth number counter animation */
+@keyframes countUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.count-up {
+  animation: countUp 0.8s ease-out forwards;
+}
+
+/* Subtle border glow */
+@keyframes borderGlow {
+  0%, 100% {
+    border-color: rgba(0, 212, 255, 0.3);
+  }
+  50% {
+    border-color: rgba(124, 58, 237, 0.5);
+  }
+}
+
+.border-glow {
+  animation: borderGlow 3s ease-in-out infinite;
+}
+
+/* Smooth slide in from sides */
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.slide-in-left {
+  animation: slideInLeft 0.5s ease-out forwards;
+}
+
+.slide-in-right {
+  animation: slideInRight 0.5s ease-out forwards;
+}
+
+/* Subtle background gradient shift */
+@keyframes bgShift {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+.bg-shift {
+  background: linear-gradient(135deg, rgba(0, 212, 255, 0.1), rgba(124, 58, 237, 0.1), rgba(16, 185, 129, 0.1));
+  background-size: 200% 200%;
+  animation: bgShift 10s ease infinite;
+}
+
+/* Progress bar fill animation */
+@keyframes fillProgress {
+  from {
+    width: 0%;
+  }
+}
+
+.fill-progress {
+  animation: fillProgress 1s ease-out forwards;
+}
+
+/* Smooth rotation */
+@keyframes smoothRotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.smooth-rotate {
+  animation: smoothRotate 20s linear infinite;
+}
+
+/* Subtle bounce on hover */
+@keyframes subtleBounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+.hover-bounce:hover {
+  animation: subtleBounce 0.5s ease infinite;
+}

@@ -52,6 +52,7 @@ class _AsyncSqliteSaver(SqliteSaver):
 
 from .state import AutoGITState, create_initial_state
 from .nodes import (
+    requirements_extraction_node,
     research_node,
     generate_perspectives_node,
     problem_extraction_node,
@@ -63,9 +64,11 @@ from .nodes import (
     code_generation_node,
     code_review_agent_node,
     code_testing_node,
+    feature_verification_node,
     strategy_reasoner_node,
     code_fixing_node,
     pipeline_self_eval_node,
+    goal_achievement_eval_node,
     git_publishing_node
 )
 
@@ -326,9 +329,9 @@ def should_regen_or_publish(state: AutoGITState) -> Literal["fix", "publish"]:
 
 def should_fix_code(state: AutoGITState) -> Literal["fix", "publish"]:
     """Routing function: Decide whether to fix code or proceed to publishing"""
-    tests_passed = state.get("tests_passed", True)
+    tests_passed = state.get("tests_passed", False)  # Fail-safe: default to False (never auto-publish untested code)
     fix_attempts = state.get("fix_attempts", 0)
-    max_attempts = state.get("max_fix_attempts", 3)  # Reduced from 6 to prevent OOM
+    max_attempts = state.get("max_fix_attempts", 3)  # 3 max — more budget for complex projects
     current_stage = state.get("current_stage", "")
     
     # CRITICAL: If no files were generated, skip fixing entirely
@@ -342,9 +345,11 @@ def should_fix_code(state: AutoGITState) -> Literal["fix", "publish"]:
     if tests_passed:
         return "publish"
     
-    # If testing was skipped (no errors to fix), go to self-eval/publish
-    if current_stage in ["testing_skipped", "no_errors_to_fix", "fixing_failed", "fixing_error"]:
-        logger.info(f"   Stage {current_stage}, routing to publish")
+    # --- From here: tests_passed is False ---
+    
+    # If fixing already failed or errored (avoid infinite loops)
+    if current_stage in ["fixing_failed", "fixing_error"]:
+        logger.info(f"   Stage {current_stage} (fix already attempted), routing to publish")
         return "publish"
 
     # HARD CAP: never exceed max attempts regardless of reason
@@ -352,8 +357,8 @@ def should_fix_code(state: AutoGITState) -> Literal["fix", "publish"]:
         logger.warning(f"   Max fix attempts reached ({fix_attempts}/{max_attempts}) — giving up")
         return "publish"
     
-    # Still have budget — try to fix
-    logger.info(f"   Fix attempt {fix_attempts + 1}/{max_attempts}")
+    # Tests failed and we have fix budget — try to fix
+    logger.info(f"   Tests failed → fix attempt {fix_attempts + 1}/{max_attempts}")
     return "fix"
 
 
@@ -362,6 +367,7 @@ def build_workflow() -> StateGraph:
     workflow = StateGraph(AutoGITState)
     
     # Add nodes
+    workflow.add_node("requirements_extraction", requirements_extraction_node)
     workflow.add_node("research", research_node)
     workflow.add_node("generate_perspectives", generate_perspectives_node)
     workflow.add_node("problem_extraction", problem_extraction_node)
@@ -373,13 +379,16 @@ def build_workflow() -> StateGraph:
     workflow.add_node("code_generation", code_generation_node)
     workflow.add_node("code_review_agent", code_review_agent_node)
     workflow.add_node("code_testing", code_testing_node)
+    workflow.add_node("feature_verification", feature_verification_node)
     workflow.add_node("strategy_reasoner", strategy_reasoner_node)
     workflow.add_node("code_fixing", code_fixing_node)
     workflow.add_node("pipeline_self_eval", pipeline_self_eval_node)
+    workflow.add_node("goal_achievement_eval", goal_achievement_eval_node)
     workflow.add_node("git_publishing", git_publishing_node)
     
     # Define the flow
-    workflow.set_entry_point("research")
+    workflow.set_entry_point("requirements_extraction")
+    workflow.add_edge("requirements_extraction", "research")
     workflow.add_edge("research", "generate_perspectives")
     workflow.add_edge("generate_perspectives", "problem_extraction")
     workflow.add_edge("problem_extraction", "solution_generation")
@@ -402,9 +411,12 @@ def build_workflow() -> StateGraph:
     workflow.add_edge("code_generation", "code_review_agent")
     workflow.add_edge("code_review_agent", "code_testing")
     
-    # Conditional: if tests fail, reason about WHY then fix; if pass, go to self-eval
+    # After basic tests, run feature verification (runtime sandbox per-feature)
+    workflow.add_edge("code_testing", "feature_verification")
+    
+    # Conditional: if tests/features fail, reason about WHY then fix; if pass, go to self-eval
     workflow.add_conditional_edges(
-        "code_testing",
+        "feature_verification",
         should_fix_code,
         {
             "fix": "strategy_reasoner",    # reason first, then fix
@@ -415,30 +427,51 @@ def build_workflow() -> StateGraph:
     # Strategy reasoner always flows into code_fixing
     workflow.add_edge("strategy_reasoner", "code_fixing")
 
-    # After fixing: route through code_review_agent for a quick sanity check,
-    # or skip to eval if nothing to fix
-    def _after_fixing(state: AutoGITState) -> Literal["review", "eval"]:
+    # After fixing: re-run code_review_agent on the FIRST fix cycle to catch
+    # fix-introduced bugs, then skip review on subsequent cycles for speed.
+    def _after_fixing(state: AutoGITState) -> Literal["review", "retest", "eval"]:
         stage = state.get("current_stage", "")
         if stage in ("no_errors_to_fix", "fixing_failed", "fixing_error"):
-            logger.info(f"   code_fixing returned '{stage}' — skipping review, going to self-eval")
+            logger.info(f"   code_fixing returned '{stage}' — nothing fixed, going to self-eval")
             return "eval"
-        return "review"
+        fix_attempts = state.get("fix_attempts", 0)
+        if fix_attempts <= 1:
+            logger.info("   First fix cycle → routing through code_review_agent")
+            return "review"
+        return "retest"
 
     workflow.add_conditional_edges(
         "code_fixing",
         _after_fixing,
         {
-            "review": "code_review_agent",   # review fixes before retesting
+            "review": "code_review_agent",   # first fix cycle: review for fix-introduced bugs
+            "retest": "code_testing",         # subsequent cycles: skip review for speed
             "eval": "pipeline_self_eval",
         }
     )
 
-    # Self-eval: approved → publish; needs_work → reason + fix again
+    # Self-eval: approved → goal eval; needs_work → reason + fix again
     workflow.add_conditional_edges(
         "pipeline_self_eval",
         should_regen_or_publish,
         {
             "fix": "strategy_reasoner",   # reason before fixing on self-eval too
+            "publish": "goal_achievement_eval",
+        }
+    )
+
+    # Goal eval: approved → publish; needs_work → reason + fix specific requirements
+    def _goal_eval_route(state: AutoGITState) -> Literal["fix", "publish"]:
+        stage = state.get("current_stage", "")
+        if stage == "goal_eval_needs_work":
+            return "fix"
+        return "publish"
+
+    workflow.add_conditional_edges(
+        "goal_achievement_eval",
+        _goal_eval_route,
+        {
+            "fix": "strategy_reasoner",
             "publish": "git_publishing",
         }
     )
@@ -555,6 +588,7 @@ async def run_auto_git_pipeline(
         ("code_generation",   "💻 Generating implementation code..."),
         ("code_review_agent", "🔍 Deep code review..."),
         ("code_testing",      "🧪 Testing code..."),
+        ("feature_verification", "🔍 Verifying features in sandbox..."),
         ("strategy_reasoner", "🧠 Reasoning about failures..."),
         ("code_fixing",       "🔧 Auto-fixing issues..."),
         ("pipeline_self_eval","🔬 Self-evaluating quality..."),
@@ -637,6 +671,23 @@ async def run_auto_git_pipeline(
                             fix_attempts = node_state.get("fix_attempts", 0)
                             max_attempts = node_state.get("max_fix_attempts", 3)
                             console.print(f"[dim]Fix attempt {fix_attempts}/{max_attempts} — auto-continuing...[/dim]\n")
+                    
+                    elif node_name == "feature_verification":
+                        fv_stage = node_state.get("current_stage", "")
+                        if fv_stage == "feature_verification_complete":
+                            fv_report = (node_state.get("test_results") or {}).get("feature_verification", {})
+                            fv_summary = fv_report.get("summary", {})
+                            fv_total = fv_summary.get("total", 0)
+                            fv_passed = fv_summary.get("passed", 0)
+                            fv_rate = fv_summary.get("pass_rate", 0)
+                            if fv_rate >= 80:
+                                console.print(f"[green]✅ Feature verification: {fv_passed}/{fv_total} passed ({fv_rate:.0f}%)[/green]")
+                            elif fv_rate >= 50:
+                                console.print(f"[yellow]⚠️  Feature verification: {fv_passed}/{fv_total} passed ({fv_rate:.0f}%)[/yellow]")
+                            else:
+                                console.print(f"[red]❌ Feature verification: {fv_passed}/{fv_total} passed ({fv_rate:.0f}%) — routing to fix[/red]")
+                        elif fv_stage == "feature_verification_skipped":
+                            console.print("[dim]Feature verification skipped[/dim]")
                     
                     elif node_name == "code_fixing" and current_stage == "code_fixed":
                         fix_attempts = node_state.get("fix_attempts", 0)
