@@ -49,6 +49,7 @@ def _safe_subprocess_env() -> Dict[str, str]:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     # Ensure pip doesn't hang asking for input
     env["PIP_NO_INPUT"] = "1"
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     return env
 
 
@@ -154,16 +155,10 @@ class CodeExecutor:
         try:
             logger.info("Installing dependencies...")
             python_exe = self.get_python_executable()
-            
-            # Upgrade pip first using python -m pip (recommended way)
-            subprocess.run(
-                [str(python_exe), "-m", "pip", "install", "--upgrade", "pip"],
-                check=True,
-                capture_output=True,
-                timeout=60,
-                env=_safe_subprocess_env(),
-            )
-            
+
+            # Latency optimization: avoid unconditional pip self-upgrade on every
+            # pipeline test cycle. It adds network/process overhead and does not
+            # improve generated-project correctness.
             # Install requirements using python -m pip
             # --prefer-binary avoids source compilation (torch, scipy, etc.) which can hang
             result = subprocess.run(

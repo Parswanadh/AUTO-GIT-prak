@@ -5,6 +5,44 @@
 
 ---
 
+## 📝 MARCH 7, 2026 EXECUTION LOG (GitHub Copilot)
+
+### Actions Documented This Session
+- ✅ Confirmed GitHub push was executed via GitHub CLI + git (`gh auth setup-git`, `git add .`, `git commit`, `git push origin master`)
+- ✅ Re-checked main pipeline compile state — `src/langraph_pipeline/nodes.py` is currently syntax-clean again
+- ✅ Launched sub-agents to investigate root causes of pipeline slowness from both:
+   - static code analysis
+   - docs/logs/runtime evidence
+- ✅ Began bug-fix pass by correcting dependency gaps in `requirements.txt`
+   - added `ruff`
+   - added `bandit`
+   - added `streamlit`
+   - added `pandas`
+- ✅ Applied first low-risk latency optimization in `src/utils/code_executor.py`
+   - disabled pip version-check overhead in subprocess env
+   - removed unconditional `pip install --upgrade pip` from every test cycle
+- ✅ Started consolidated reporting for delay analysis and execution trace documentation
+- ✅ Created `PIPELINE_DELAY_ROOT_CAUSE_REPORT.md`
+
+### New High-Confidence Findings
+- 🔴 Main slowdown is in the **back half of the pipeline**, not the front half
+- 🔴 Biggest wall-time drivers are:
+   1. repeated environment creation + dependency installation
+   2. large LLM timeout budgets and fallback cascades
+   3. repeated code review / test / fix loops
+   4. multi-pass code generation and regeneration
+- 🟡 Resource monitoring still exists but is **not integrated into the live workflow**
+- 🟡 Validation is stronger than older docs claim, but some required tools were still missing from `requirements.txt`
+
+### Immediate Next Fix Targets
+- [ ] Reuse a persistent test environment instead of recreating venv + installs every cycle
+- [ ] Add node-level timing / timeout budgets to stop runaway slow stages
+- [ ] Reduce or gate expensive review/fix loops after small deterministic fixes
+- [ ] Integrate `ResourceMonitor` into `workflow_enhanced.py` and heavy nodes
+- [ ] Verify MCP execution path end-to-end and update stale docs
+
+---
+
 ## 📊 CURRENT BUILD STATUS
 
 ### ✅ COMPLETED (Working)

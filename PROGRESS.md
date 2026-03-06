@@ -5,6 +5,82 @@
 
 ---
 
+## March 7, 2026 - Session 15: GitHub Push + Bug-Fix Start + Slowdown Root-Cause Investigation (GitHub Copilot)
+
+**Agent**: GitHub Copilot  
+**Goal**: Make sure the work is pushed, begin fixing active bugs, launch sub-agents to find the true causes of pipeline delay, and document every step.
+
+### Step-by-Step Actions Documented
+
+1. **Verified GitHub push command already executed successfully**
+	- Observed completed terminal command:
+	  - `gh auth setup-git`
+	  - `git add .`
+	  - `git commit -m "Session 14: document audit and pipeline improvements"`
+	  - `git push origin master`
+
+2. **Re-checked the pipeline compile blocker before doing more work**
+	- Re-ran error inspection on `src/langraph_pipeline/nodes.py`
+	- Confirmed the previously broken fix-loop section is now syntax-clean
+
+3. **Inspected current bug surface**
+	- Checked `dashboard.py`
+	- Confirmed the dashboard depends on `streamlit` and `pandas`
+	- Re-checked `requirements.txt` and confirmed `bandit`, `ruff`, `streamlit`, and `pandas` were missing
+
+4. **Launched sub-agents specifically for root-cause analysis of slowness**
+	- Sub-agent A: static code path analysis of latency sources
+	- Sub-agent B: docs/logs/runtime evidence analysis of actual delays
+
+5. **Started concrete bug fixing**
+	- Updated `requirements.txt` to add missing operational dependencies:
+	  - `ruff`
+	  - `bandit`
+	  - `streamlit`
+	  - `pandas`
+	- Updated `src/utils/code_executor.py` to reduce avoidable test-stage latency:
+	  - removed unconditional `pip install --upgrade pip`
+	  - disabled pip version-check overhead in subprocess environments
+
+6. **Prepared new documentation outputs**
+	- Updated `BUILD_STATUS_TODO.md` with a dated execution log
+	- Created `PIPELINE_DELAY_ROOT_CAUSE_REPORT.md`
+	- Recorded this entire action sequence in `PROGRESS.md`
+
+### Root Causes of Slow Pipeline Identified
+
+#### Dominant causes
+1. **Repeated environment recreation + dependency installation**
+	- Testing phases repeatedly create environments and reinstall dependencies
+	- This is one of the largest avoidable wall-time costs
+
+2. **High LLM timeout budgets + fallback cascades**
+	- Some stages allow very long waits before failing over
+	- This causes minute-scale stalls per bad call
+
+3. **Multi-pass code generation / review / fix loops**
+	- Code generation, review, testing, strategy reasoning, and fixing can repeat several times
+	- Failing runs amplify latency dramatically
+
+4. **Expensive per-file validation and late-stage verification**
+	- Enhanced validation is valuable but still costly when repeated across many files and iterations
+
+#### Supporting evidence
+- Docs claim 5–10 minute typical runtime, but logs show much longer real runs
+- Recorded runs reached roughly 20–80+ minutes
+- One traced run showed the largest delays in:
+  - `code_review_agent`
+  - `code_generation`
+  - `code_fixing`
+  - repeated `code_testing` / `strategy_reasoner`
+
+### Immediate Fix Direction Chosen
+- First fix wave: dependency / tooling gaps
+- Next fix wave: remove repeated env setup and reduce retry/timeout waste
+- After that: add observability so delays can be measured per node rather than guessed
+
+---
+
 ## March 7, 2026 - Session 14: Whole-Codebase Remaining-Work Audit (GitHub Copilot)
 
 **Agent**: GitHub Copilot  
