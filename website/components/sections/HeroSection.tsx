@@ -129,6 +129,19 @@ export default function HeroSection() {
           </a>
         </motion.div>
 
+        <motion.p
+          className="mx-auto mb-8 text-sm text-[rgba(248,250,252,0.62)]"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 * durationFactor, delay: 0.28 }}
+        >
+          Need a hands-free booth walkthrough?
+          {' '}
+          <a href="/?autodemo=1&autospeed=28#hero" className="font-semibold text-cyan-300 hover:text-cyan-200">
+            Launch auto tour mode
+          </a>
+        </motion.p>
+
         <TrustBadges />
 
         <motion.div

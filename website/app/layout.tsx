@@ -5,6 +5,7 @@ import VerificationBadge from "@/components/VerificationBadge";
 import ScrollProgress from "@/components/ScrollProgress";
 import PresentationModeProvider from "@/components/PresentationModeProvider";
 import PresentationModeSwitcher from "@/components/PresentationModeSwitcher";
+import AutoScrollDemoController from "@/components/AutoScrollDemoController";
 
 export const metadata: Metadata = {
   title: "Auto-GIT | AI-Powered Autonomous Software Development",
@@ -41,6 +42,7 @@ export default function RootLayout({
 
           <VerificationBadge />
           <PresentationModeSwitcher />
+          <AutoScrollDemoController />
         </PresentationModeProvider>
       </body>
     </html>
